@@ -5,34 +5,26 @@ import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { PDFDocument, rgb, degrees as pdfDegrees, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
+import { AuthRequest, optionalAuth } from "../middleware/auth";
+import { handleConversion } from "../services/conversion.service";
+import { uploadToCloudinary } from "../services/cloudinary.service";
 
 const router = Router();
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./uploads";
 const OUTPUT_DIR = process.env.OUTPUT_DIR || "./outputs";
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || "104857600", 10);
 
-// Ensure directories exist
-[UPLOAD_DIR, OUTPUT_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
+// Ensure output directory exists (for temporary processing)
+if (!fs.existsSync(OUTPUT_DIR)) {
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+}
 
-// Configure multer
+// Configure multer to use memory storage (files will be uploaded to Cloudinary)
 const storage = multer.memoryStorage();
 const upload = multer({
   storage,
   limits: { fileSize: MAX_FILE_SIZE },
 });
-
-// Helper to save output file
-const saveOutput = (buffer: Buffer, ext: string): string => {
-  const filename = `${uuidv4()}${ext}`;
-  const filepath = path.join(OUTPUT_DIR, filename);
-  fs.writeFileSync(filepath, buffer);
-  return filename;
-};
 
 // Helper to parse page ranges (e.g., "1,3,5-7")
 const parsePageRanges = (pagesParam: string, totalPages: number): number[] => {
@@ -61,7 +53,7 @@ const parsePageRanges = (pagesParam: string, totalPages: number): number[] => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Merge PDF
-router.post("/merge-pdf", upload.array("files", 20), async (req: Request, res: Response): Promise<void> => {
+router.post("/merge-pdf", optionalAuth, upload.array("files", 20), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length < 2) {
@@ -77,16 +69,11 @@ router.post("/merge-pdf", upload.array("files", 20), async (req: Request, res: R
     }
 
     const pdfBytes = await mergedPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDFs merged successfully",
-      file: {
-        filename,
-        originalName: "merged.pdf",
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: "merged.pdf",
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Merge PDF error:", error);
@@ -95,7 +82,7 @@ router.post("/merge-pdf", upload.array("files", 20), async (req: Request, res: R
 });
 
 // Split PDF
-router.post("/split-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/split-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -113,21 +100,15 @@ router.post("/split-pdf", upload.single("file"), async (req: Request, res: Respo
       newPdf.addPage(page);
       
       const pdfBytes = await newPdf.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
       
       outputFiles.push({
-        filename,
-        originalName: `page_${i + 1}.pdf`,
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
+        buffer: Buffer.from(pdfBytes),
+        filename: `page_${i + 1}.pdf`,
+        mimetype: "application/pdf"
       });
     }
 
-    res.json({
-      message: `PDF split into ${pageCount} pages`,
-      files: outputFiles,
-      file: outputFiles[0], // For compatibility
-    });
+    await handleConversion(req, res, outputFiles);
   } catch (error) {
     console.error("Split PDF error:", error);
     res.status(500).json({ message: "Split failed" });
@@ -135,7 +116,7 @@ router.post("/split-pdf", upload.single("file"), async (req: Request, res: Respo
 });
 
 // Extract PDF Pages
-router.post("/extract-pdf-pages", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/extract-pdf-pages", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const pagesParam = (req.query.pages as string) || "1";
@@ -153,16 +134,11 @@ router.post("/extract-pdf-pages", upload.single("file"), async (req: Request, re
     pages.forEach((page) => newPdf.addPage(page));
 
     const pdfBytes = await newPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: `Extracted ${pageIndices.length} page(s)`,
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_extracted.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_extracted.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Extract pages error:", error);
@@ -171,7 +147,7 @@ router.post("/extract-pdf-pages", upload.single("file"), async (req: Request, re
 });
 
 // Remove PDF Pages
-router.post("/remove-pdf-pages", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/remove-pdf-pages", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const pagesParam = (req.query.pages as string) || "1";
@@ -192,16 +168,11 @@ router.post("/remove-pdf-pages", upload.single("file"), async (req: Request, res
     pages.forEach((page) => newPdf.addPage(page));
 
     const pdfBytes = await newPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: `Removed ${removeIndices.size} page(s)`,
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_modified.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_modified.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Remove pages error:", error);
@@ -210,7 +181,7 @@ router.post("/remove-pdf-pages", upload.single("file"), async (req: Request, res
 });
 
 // Organize PDF (reorder pages)
-router.post("/organize-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/organize-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const orderParam = (req.query.order as string) || "";
@@ -228,16 +199,11 @@ router.post("/organize-pdf", upload.single("file"), async (req: Request, res: Re
     pages.forEach((page) => newPdf.addPage(page));
 
     const pdfBytes = await newPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDF pages reorganized",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_organized.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_organized.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Organize PDF error:", error);
@@ -246,7 +212,7 @@ router.post("/organize-pdf", upload.single("file"), async (req: Request, res: Re
 });
 
 // Reverse PDF
-router.post("/reverse-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/reverse-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -262,16 +228,11 @@ router.post("/reverse-pdf", upload.single("file"), async (req: Request, res: Res
     pages.forEach((page) => newPdf.addPage(page));
 
     const pdfBytes = await newPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDF pages reversed",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_reversed.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_reversed.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Reverse PDF error:", error);
@@ -280,7 +241,7 @@ router.post("/reverse-pdf", upload.single("file"), async (req: Request, res: Res
 });
 
 // Rotate PDF
-router.post("/rotate-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/rotate-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const rotation = parseInt(req.query.degrees as string) || 90;
@@ -299,16 +260,11 @@ router.post("/rotate-pdf", upload.single("file"), async (req: Request, res: Resp
     });
 
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: `PDF rotated ${rotation}°`,
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_rotated.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_rotated.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Rotate PDF error:", error);
@@ -317,7 +273,7 @@ router.post("/rotate-pdf", upload.single("file"), async (req: Request, res: Resp
 });
 
 // Merge PDF & Image
-router.post("/merge-pdf-image", upload.array("files", 20), async (req: Request, res: Response): Promise<void> => {
+router.post("/merge-pdf-image", optionalAuth, upload.array("files", 20), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const files = req.files as Express.Multer.File[];
     if (!files || files.length === 0) {
@@ -341,16 +297,11 @@ router.post("/merge-pdf-image", upload.array("files", 20), async (req: Request, 
     }
 
     const pdfBytes = await mergedPdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Files merged successfully",
-      file: {
-        filename,
-        originalName: "merged.pdf",
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: "merged.pdf",
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Merge PDF & Image error:", error);
@@ -359,7 +310,7 @@ router.post("/merge-pdf-image", upload.array("files", 20), async (req: Request, 
 });
 
 // Merge PDF & Text
-router.post("/merge-pdf-text", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/merge-pdf-text", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const text = (req.body.text || "").toString();
@@ -377,7 +328,7 @@ router.post("/merge-pdf-text", upload.single("file"), async (req: Request, res: 
     const lines = text.split("\n");
     let y = 750;
     
-    lines.forEach(line => {
+    lines.forEach((line: string) => {
       if (y > 50) {
         textPage.drawText(line, { x: 50, y, size: 12, font, color: rgb(0, 0, 0) });
         y -= 20;
@@ -385,16 +336,11 @@ router.post("/merge-pdf-text", upload.single("file"), async (req: Request, res: 
     });
 
     const pdfBytes = await pdfDoc.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Text added to PDF",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_with_text.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_with_text.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Merge PDF & Text error:", error);
@@ -403,7 +349,7 @@ router.post("/merge-pdf-text", upload.single("file"), async (req: Request, res: 
 });
 
 // Make PDF Parts
-router.post("/make-pdf-parts", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/make-pdf-parts", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const parts = parseInt(req.query.parts as string) || 2;
@@ -428,21 +374,15 @@ router.post("/make-pdf-parts", upload.single("file"), async (req: Request, res: 
       pages.forEach((page) => newPdf.addPage(page));
 
       const pdfBytes = await newPdf.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
       
       outputFiles.push({
-        filename,
-        originalName: `part_${i + 1}.pdf`,
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
+        buffer: Buffer.from(pdfBytes),
+        filename: `part_${i + 1}.pdf`,
+        mimetype: "application/pdf"
       });
     }
 
-    res.json({
-      message: `PDF divided into ${parts} parts`,
-      files: outputFiles,
-      file: outputFiles[0],
-    });
+    await handleConversion(req, res, outputFiles);
   } catch (error) {
     console.error("Make PDF Parts error:", error);
     res.status(500).json({ message: "Division failed" });
@@ -451,8 +391,10 @@ router.post("/make-pdf-parts", upload.single("file"), async (req: Request, res: 
 
 // PDF Splitter (alias for split-pdf)
 router.post("/pdf-splitter", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
-  req.url = "/split-pdf";
-  return router.handle(req, res, () => {});
+  res.status(400).json({ 
+    message: "Please use /split-pdf endpoint instead",
+    correctEndpoint: "/convert/split-pdf"
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -460,7 +402,7 @@ router.post("/pdf-splitter", upload.single("file"), async (req: Request, res: Re
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Compress PDF
-router.post("/compress-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/compress-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -471,19 +413,10 @@ router.post("/compress-pdf", upload.single("file"), async (req: Request, res: Re
     const pdf = await PDFDocument.load(file.buffer, { ignoreEncryption: true });
     const pdfBytes = await pdf.save({ useObjectStreams: true, addDefaultPage: false });
     
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
-    const originalSize = file.buffer.length;
-    const newSize = pdfBytes.length;
-    const savings = Math.max(0, Math.round((1 - newSize / originalSize) * 100));
-
-    res.json({
-      message: `PDF compressed${savings > 0 ? ` (${savings}% smaller)` : ""}`,
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_compressed.pdf"),
-        url: `/outputs/${filename}`,
-        size: newSize,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_compressed.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Compress PDF error:", error);
@@ -499,7 +432,7 @@ const advancedPdfTools = [
 ];
 
 advancedPdfTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       if (!file) {
@@ -509,16 +442,11 @@ advancedPdfTools.forEach(tool => {
 
       const pdf = await PDFDocument.load(file.buffer);
       const pdfBytes = await pdf.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-      res.json({
-        message: `${tool.replace(/-/g, " ")} processed`,
-        file: {
-          filename,
-          originalName: file.originalname,
-          url: `/outputs/${filename}`,
-          size: pdfBytes.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(pdfBytes),
+        filename: file.originalname,
+        mimetype: "application/pdf"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -538,7 +466,7 @@ const imageToPdfTools = [
 ];
 
 imageToPdfTools.forEach(tool => {
-  router.post(`/${tool}`, upload.array("files", 20), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.array("files", 20), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const files = req.files as Express.Multer.File[];
       if (!files || files.length === 0) {
@@ -560,16 +488,11 @@ imageToPdfTools.forEach(tool => {
       }
 
       const pdfBytes = await pdfDoc.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-      res.json({
-        message: "Conversion successful",
-        file: {
-          filename,
-          originalName: files[0].originalname.replace(/\.[^.]+$/, ".pdf"),
-          url: `/outputs/${filename}`,
-          size: pdfBytes.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(pdfBytes),
+        filename: files[0].originalname.replace(/\.[^.]+$/, ".pdf"),
+        mimetype: "application/pdf"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -586,7 +509,7 @@ const textToPdfTools = [
 ];
 
 textToPdfTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       const textContent = req.body.text || (file ? file.buffer.toString("utf-8") : "");
@@ -611,16 +534,11 @@ textToPdfTools.forEach(tool => {
       });
 
       const pdfBytes = await pdfDoc.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-      res.json({
-        message: "Conversion successful",
-        file: {
-          filename,
-          originalName: (file?.originalname || "converted").replace(/\.[^.]+$/, ".pdf"),
-          url: `/outputs/${filename}`,
-          size: pdfBytes.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(pdfBytes),
+        filename: (file?.originalname || "converted").replace(/\.[^.]+$/, ".pdf"),
+        mimetype: "application/pdf"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -636,7 +554,7 @@ const docToPdfTools = [
 ];
 
 docToPdfTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       if (!file) {
@@ -658,16 +576,11 @@ docToPdfTools.forEach(tool => {
       });
 
       const pdfBytes = await pdfDoc.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-      res.json({
-        message: "Conversion successful (Note: Advanced document conversion requires additional setup)",
-        file: {
-          filename,
-          originalName: file.originalname.replace(/\.[^.]+$/, ".pdf"),
-          url: `/outputs/${filename}`,
-          size: pdfBytes.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(pdfBytes),
+        filename: file.originalname.replace(/\.[^.]+$/, ".pdf"),
+        mimetype: "application/pdf"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -677,7 +590,7 @@ docToPdfTools.forEach(tool => {
 });
 
 // Special tools
-router.post("/base64-to-pdf", upload.none(), async (req: Request, res: Response): Promise<void> => {
+router.post("/base64-to-pdf", optionalAuth, upload.none(), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const base64Data = req.body.base64;
     if (!base64Data) {
@@ -686,16 +599,11 @@ router.post("/base64-to-pdf", upload.none(), async (req: Request, res: Response)
     }
 
     const buffer = Buffer.from(base64Data, "base64");
-    const filename = saveOutput(buffer, ".pdf");
 
-    res.json({
-      message: "Conversion successful",
-      file: {
-        filename,
-        originalName: "decoded.pdf",
-        url: `/outputs/${filename}`,
-        size: buffer.length,
-      },
+    await handleConversion(req, res, {
+      buffer,
+      filename: "decoded.pdf",
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Base64 to PDF error:", error);
@@ -704,8 +612,10 @@ router.post("/base64-to-pdf", upload.none(), async (req: Request, res: Response)
 });
 
 router.post("/camera-to-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
-  req.url = "/jpg-to-pdf";
-  return router.handle(req, res, () => {});
+  res.status(400).json({ 
+    message: "Please use /jpg-to-pdf endpoint instead",
+    correctEndpoint: "/convert/jpg-to-pdf"
+  });
 });
 
 router.post("/speech-to-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
@@ -764,7 +674,7 @@ const pdfToTextTools = [
 ];
 
 pdfToTextTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       if (!file) {
@@ -776,16 +686,11 @@ pdfToTextTools.forEach(tool => {
       
       // Create a simple text file placeholder
       const textContent = `Converted from ${file.originalname}\nPages: ${pdf.getPageCount()}`;
-      const filename = saveOutput(Buffer.from(textContent), ".txt");
 
-      res.json({
-        message: `${tool} processed (Note: Text extraction requires OCR library)`,
-        file: {
-          filename,
-          originalName: file.originalname.replace(".pdf", tool.replace("pdf-to-", ".")),
-          url: `/outputs/${filename}`,
-          size: textContent.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(textContent),
+        filename: file.originalname.replace(".pdf", tool.replace("pdf-to-", ".")),
+        mimetype: "text/plain"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -821,7 +726,7 @@ router.post("/pdf-to-base64", upload.single("file"), async (req: Request, res: R
   }
 });
 
-router.post("/pdf-to-zip", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/pdf-to-zip", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -829,16 +734,10 @@ router.post("/pdf-to-zip", upload.single("file"), async (req: Request, res: Resp
       return;
     }
 
-    const filename = saveOutput(file.buffer, ".pdf");
-    
-    res.json({
-      message: "PDF archived (ZIP creation requires additional library)",
-      file: {
-        filename,
-        originalName: file.originalname,
-        url: `/outputs/${filename}`,
-        size: file.buffer.length,
-      },
+    await handleConversion(req, res, {
+      buffer: file.buffer,
+      filename: file.originalname,
+      mimetype: "application/pdf"
     });
   } catch (error) {
     res.status(500).json({ message: "Archiving failed" });
@@ -846,20 +745,24 @@ router.post("/pdf-to-zip", upload.single("file"), async (req: Request, res: Resp
 });
 
 router.post("/pdf-to-psd", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
-  req.url = "/pdf-to-jpg";
-  return router.handle(req, res, () => {});
+  res.status(400).json({ 
+    message: "Please use /pdf-to-jpg endpoint instead",
+    correctEndpoint: "/convert/pdf-to-jpg"
+  });
 });
 
 router.post("/pdf-to-eps", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
-  req.url = "/pdf-to-jpg";
-  return router.handle(req, res, () => {});
+  res.status(400).json({ 
+    message: "Please use /pdf-to-jpg endpoint instead",
+    correctEndpoint: "/convert/pdf-to-jpg"
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // EDIT PDF TOOLS (9 tools)
 // ═══════════════════════════════════════════════════════════════════════════
 
-router.post("/add-page-number", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/add-page-number", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -883,16 +786,11 @@ router.post("/add-page-number", upload.single("file"), async (req: Request, res:
     });
 
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Page numbers added",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_numbered.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_numbered.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Add page number error:", error);
@@ -900,7 +798,7 @@ router.post("/add-page-number", upload.single("file"), async (req: Request, res:
   }
 });
 
-router.post("/add-watermark", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/add-watermark", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const watermarkText = (req.body.watermark || "WATERMARK").toString();
@@ -927,16 +825,11 @@ router.post("/add-watermark", upload.single("file"), async (req: Request, res: R
     });
 
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Watermark added",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_watermarked.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_watermarked.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Add watermark error:", error);
@@ -950,7 +843,7 @@ const editPdfTools = [
 ];
 
 editPdfTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       
@@ -961,16 +854,11 @@ editPdfTools.forEach(tool => {
         page.drawText("Generated PDF", { x: 50, y: 700, size: 24, font });
         
         const pdfBytes = await pdfDoc.save();
-        const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
         
-        res.json({
-          message: "PDF generated",
-          file: {
-            filename,
-            originalName: "generated.pdf",
-            url: `/outputs/${filename}`,
-            size: pdfBytes.length,
-          },
+        await handleConversion(req, res, {
+          buffer: Buffer.from(pdfBytes),
+          filename: "generated.pdf",
+          mimetype: "application/pdf"
         });
         return;
       }
@@ -982,16 +870,11 @@ editPdfTools.forEach(tool => {
 
       const pdf = await PDFDocument.load(file.buffer);
       const pdfBytes = await pdf.save();
-      const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-      res.json({
-        message: `${tool.replace(/-/g, " ")} processed`,
-        file: {
-          filename,
-          originalName: file.originalname,
-          url: `/outputs/${filename}`,
-          size: pdfBytes.length,
-        },
+      await handleConversion(req, res, {
+        buffer: Buffer.from(pdfBytes),
+        filename: file.originalname,
+        mimetype: "application/pdf"
       });
     } catch (error) {
       console.error(`${tool} error:`, error);
@@ -1004,7 +887,7 @@ editPdfTools.forEach(tool => {
 // SECURITY TOOLS (4 tools)
 // ═══════════════════════════════════════════════════════════════════════════
 
-router.post("/protect-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/protect-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const password = (req.body.password || "").toString();
@@ -1018,16 +901,11 @@ router.post("/protect-pdf", upload.single("file"), async (req: Request, res: Res
     // This would require qpdf or similar tool
     const pdf = await PDFDocument.load(file.buffer);
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDF processed (Password protection requires external tool)",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_protected.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_protected.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Protect PDF error:", error);
@@ -1035,7 +913,7 @@ router.post("/protect-pdf", upload.single("file"), async (req: Request, res: Res
   }
 });
 
-router.post("/unlock-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/unlock-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     const password = (req.body.password || "").toString();
@@ -1047,16 +925,11 @@ router.post("/unlock-pdf", upload.single("file"), async (req: Request, res: Resp
 
     const pdf = await PDFDocument.load(file.buffer, { ignoreEncryption: true });
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDF unlocked",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_unlocked.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_unlocked.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Unlock PDF error:", error);
@@ -1064,7 +937,7 @@ router.post("/unlock-pdf", upload.single("file"), async (req: Request, res: Resp
   }
 });
 
-router.post("/sign-pdf", upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+router.post("/sign-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
@@ -1087,16 +960,11 @@ router.post("/sign-pdf", upload.single("file"), async (req: Request, res: Respon
     });
 
     const pdfBytes = await pdf.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "PDF signed",
-      file: {
-        filename,
-        originalName: file.originalname.replace(".pdf", "_signed.pdf"),
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_signed.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Sign PDF error:", error);
@@ -1155,7 +1023,7 @@ aiTools.forEach(tool => {
 // BUSINESS & UTILITY TOOLS (11 tools)
 // ═══════════════════════════════════════════════════════════════════════════
 
-router.post("/invoice-generator", upload.none(), async (req: Request, res: Response): Promise<void> => {
+router.post("/invoice-generator", optionalAuth, upload.none(), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([612, 792]);
@@ -1166,16 +1034,11 @@ router.post("/invoice-generator", upload.none(), async (req: Request, res: Respo
     page.drawText("Date: " + new Date().toLocaleDateString(), { x: 50, y: 630, size: 12, font });
 
     const pdfBytes = await pdfDoc.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Invoice generated",
-      file: {
-        filename,
-        originalName: "invoice.pdf",
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: "invoice.pdf",
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Invoice generator error:", error);
@@ -1183,7 +1046,7 @@ router.post("/invoice-generator", upload.none(), async (req: Request, res: Respo
   }
 });
 
-router.post("/pdf-chart-generator", upload.none(), async (req: Request, res: Response): Promise<void> => {
+router.post("/pdf-chart-generator", optionalAuth, upload.none(), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([612, 792]);
@@ -1192,16 +1055,11 @@ router.post("/pdf-chart-generator", upload.none(), async (req: Request, res: Res
     page.drawText("Chart Report", { x: 250, y: 700, size: 20, font });
 
     const pdfBytes = await pdfDoc.save();
-    const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
 
-    res.json({
-      message: "Chart generated",
-      file: {
-        filename,
-        originalName: "chart.pdf",
-        url: `/outputs/${filename}`,
-        size: pdfBytes.length,
-      },
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: "chart.pdf",
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Chart generator error:", error);
@@ -1216,7 +1074,7 @@ const businessTools = [
 ];
 
 businessTools.forEach(tool => {
-  router.post(`/${tool}`, upload.single("file"), async (req: Request, res: Response): Promise<void> => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const file = req.file;
       
@@ -1232,31 +1090,21 @@ businessTools.forEach(tool => {
         page.drawText("Signature", { x: 50, y: 50, size: 24, font });
         
         const pdfBytes = await pdfDoc.save();
-        const filename = saveOutput(Buffer.from(pdfBytes), ".pdf");
         
-        res.json({
-          message: "Signature generated",
-          file: {
-            filename,
-            originalName: "signature.pdf",
-            url: `/outputs/${filename}`,
-            size: pdfBytes.length,
-          },
+        await handleConversion(req, res, {
+          buffer: Buffer.from(pdfBytes),
+          filename: "signature.pdf",
+          mimetype: "application/pdf"
         });
         return;
       }
 
       const buffer = file!.buffer;
-      const filename = saveOutput(buffer, path.extname(file!.originalname));
 
-      res.json({
-        message: `${tool.replace(/-/g, " ")} processed`,
-        file: {
-          filename,
-          originalName: file!.originalname,
-          url: `/outputs/${filename}`,
-          size: buffer.length,
-        },
+      await handleConversion(req, res, {
+        buffer,
+        filename: file!.originalname,
+        mimetype: file!.mimetype
       });
     } catch (error) {
       console.error(`${tool} error:`, error);

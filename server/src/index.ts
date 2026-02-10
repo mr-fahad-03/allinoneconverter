@@ -4,14 +4,14 @@ dotenv.config();
 
 import express from "express";
 import cors from "cors";
-import { connectDB } from "./config/db.js";
-import authRoutes from "./routes/auth.js";
-import userRoutes from "./routes/users.js";
-import ticketRoutes from "./routes/tickets.js";
-import uploadRoutes from "./routes/upload.js";
-import historyRoutes from "./routes/history.js";
-import adminRoutes from "./routes/admin.js";
-import convertRoutes from "./routes/convert.js";
+import { connectDB } from "./config/db";
+import authRoutes from "./routes/auth";
+import userRoutes from "./routes/users";
+import ticketRoutes from "./routes/tickets";
+import uploadRoutes from "./routes/upload";
+import historyRoutes from "./routes/history";
+import adminRoutes from "./routes/admin";
+import convertRoutes from "./routes/convert";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -27,10 +27,6 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Static files for uploads and outputs
-app.use("/uploads", express.static("uploads"));
-app.use("/outputs", express.static("outputs"));
 
 // Health check
 app.get("/health", (req, res) => {
@@ -57,18 +53,25 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   res.status(500).json({ message: "Internal server error" });
 });
 
-// Start server
-async function startServer() {
-  try {
-    await connectDB();
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📁 Frontend URL: ${FRONTEND_URL}`);
-    });
-  } catch (error) {
-    console.error("Failed to start server:", error);
-    process.exit(1);
+// Start server (local development)
+if (process.env.NODE_ENV !== "production") {
+  async function startServer() {
+    try {
+      await connectDB();
+      app.listen(PORT, () => {
+        console.log(`🚀 Server running on http://localhost:${PORT}`);
+        console.log(`📁 Frontend URL: ${FRONTEND_URL}`);
+      });
+    } catch (error) {
+      console.error("Failed to start server:", error);
+      process.exit(1);
+    }
   }
+  startServer();
+} else {
+  // For Vercel serverless deployment
+  connectDB().catch(err => console.error("DB connection error:", err));
 }
 
-startServer();
+// Export for Vercel
+export default app;

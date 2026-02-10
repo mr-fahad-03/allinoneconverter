@@ -1,30 +1,14 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
-import path from "path";
-import fs from "fs";
-import { v4 as uuidv4 } from "uuid";
+import { uploadToCloudinary, deleteFromCloudinary } from "../services/cloudinary.service";
+import { AuthRequest, optionalAuth } from "../middleware/auth";
 
 const router = Router();
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./uploads";
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE || "104857600", 10); // 100MB
 
-// Ensure upload directory exists
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-// Configure multer storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOAD_DIR);
-  },
-  filename: (req, file, cb) => {
-    const uniqueId = uuidv4();
-    const ext = path.extname(file.originalname);
-    cb(null, `${uniqueId}${ext}`);
-  },
-});
+// Configure multer to use memory storage (we'll upload to Cloudinary)
+const storage = multer.memoryStorage();
 
 // File filter
 const fileFilter = (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
@@ -57,21 +41,25 @@ const upload = multer({
 });
 
 // Upload single file
-router.post("/single", upload.single("file"), (req: Request, res: Response): void => {
+router.post("/single", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     if (!req.file) {
       res.status(400).json({ message: "No file provided" });
       return;
     }
 
+    // Upload to Cloudinary
+    const result = await uploadToCloudinary(req.file.buffer, "allinone-pdf/uploads");
+
     res.status(201).json({
       message: "File uploaded successfully",
       file: {
-        filename: req.file.filename,
+        publicId: result.publicId,
         originalName: req.file.originalname,
         size: req.file.size,
         mimetype: req.file.mimetype,
-        url: `/uploads/${req.file.filename}`,
+        url: result.secureUrl,
+        isAuthenticated: !!req.user,
       },
     });
   } catch (error) {
@@ -81,7 +69,7 @@ router.post("/single", upload.single("file"), (req: Request, res: Response): voi
 });
 
 // Upload multiple files
-router.post("/multiple", upload.array("files", 10), (req: Request, res: Response): void => {
+router.post("/multiple", optionalAuth, upload.array("files", 10), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const files = req.files as Express.Multer.File[];
 
@@ -90,17 +78,22 @@ router.post("/multiple", upload.array("files", 10), (req: Request, res: Response
       return;
     }
 
-    const uploadedFiles = files.map((file) => ({
-      filename: file.filename,
+    // Upload all files to Cloudinary
+    const uploadPromises = files.map(file => uploadToCloudinary(file.buffer, "allinone-pdf/uploads"));
+    const results = await Promise.all(uploadPromises);
+
+    const uploadedFiles = files.map((file, index) => ({
+      publicId: results[index].publicId,
       originalName: file.originalname,
       size: file.size,
       mimetype: file.mimetype,
-      url: `/uploads/${file.filename}`,
+      url: results[index].secureUrl,
     }));
 
     res.status(201).json({
       message: "Files uploaded successfully",
       files: uploadedFiles,
+      isAuthenticated: !!req.user,
     });
   } catch (error) {
     console.error("Upload error:", error);
@@ -108,43 +101,19 @@ router.post("/multiple", upload.array("files", 10), (req: Request, res: Response
   }
 });
 
-// Get file
-router.get("/:filename", (req: Request, res: Response): void => {
-  const filePath = path.join(UPLOAD_DIR, req.params.filename);
-
-  // Security check - prevent directory traversal
-  const normalizedPath = path.normalize(filePath);
-  if (!normalizedPath.startsWith(path.normalize(UPLOAD_DIR))) {
-    res.status(400).json({ message: "Invalid file path" });
-    return;
+// Delete file from Cloudinary
+router.delete("/:publicId", optionalAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const publicId = decodeURIComponent(req.params.publicId);
+    
+    // Delete from Cloudinary
+    await deleteFromCloudinary(publicId);
+    
+    res.json({ message: "File deleted successfully" });
+  } catch (error) {
+    console.error("Delete error:", error);
+    res.status(500).json({ message: "File deletion failed" });
   }
-
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ message: "File not found" });
-    return;
-  }
-
-  res.sendFile(path.resolve(filePath));
-});
-
-// Delete file
-router.delete("/:filename", (req: Request, res: Response): void => {
-  const filePath = path.join(UPLOAD_DIR, req.params.filename);
-
-  // Security check
-  const normalizedPath = path.normalize(filePath);
-  if (!normalizedPath.startsWith(path.normalize(UPLOAD_DIR))) {
-    res.status(400).json({ message: "Invalid file path" });
-    return;
-  }
-
-  if (!fs.existsSync(filePath)) {
-    res.status(404).json({ message: "File not found" });
-    return;
-  }
-
-  fs.unlinkSync(filePath);
-  res.json({ message: "File deleted successfully" });
 });
 
 export default router;
