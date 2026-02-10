@@ -968,24 +968,27 @@ docToPdfTools.forEach(tool => {
         return;
       }
 
+      console.log(`Starting conversion for tool: ${tool}, file: ${file.originalname}, size: ${file.buffer.length}, mimetype: ${file.mimetype}`);
+
       let pdfBytes: Buffer;
 
-      // Word to PDF conversion
-      if (tool === "word-to-pdf" && (file.mimetype.includes("word") || file.originalname.endsWith(".docx") || file.originalname.endsWith(".doc"))) {
-        try {
-          console.log(`Processing Word file: ${file.originalname}, mimetype: ${file.mimetype}`);
+      try {
+        // Word to PDF conversion
+        if (tool === "word-to-pdf") {
+          console.log(`Processing as Word file: ${file.originalname}, mimetype: ${file.mimetype}, buffer size: ${file.buffer.length}`);
           const result = await mammoth.extractRawText({ buffer: file.buffer });
+          console.log(`Mammoth extraction result:`, { hasValue: !!result.value, valueLength: result.value?.length, messages: result.messages });
           const text = result.value;
-          
+
           if (!text || text.trim().length === 0) {
             throw new Error("No text content found in Word document");
           }
-          
+
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           let page = pdfDoc.addPage([612, 792]);
           let y = 750;
-          
+
           const lines = text.split("\n");
           for (const line of lines) {
             if (y < 50) {
@@ -1002,36 +1005,25 @@ docToPdfTools.forEach(tool => {
               y -= 16;
             }
           }
-          
-          pdfBytes = Buffer.from(await pdfDoc.save());
-        } catch (err) {
-          console.error("Word conversion error:", err);
-          // Fallback to placeholder
-          const pdfDoc = await PDFDocument.create();
-          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-          const page = pdfDoc.addPage([612, 792]);
-          page.drawText(`Word file: ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
-          page.drawText("Could not extract text content", { x: 50, y: 650, size: 12, font, color: rgb(1, 0, 0) });
+
           pdfBytes = Buffer.from(await pdfDoc.save());
         }
-      }
-      // Excel to PDF conversion
-      else if ((tool === "excel-to-pdf" || tool === "spreadsheet-to-pdf") && (file.mimetype.includes("spreadsheet") || file.originalname.match(/\.(xlsx|xls|csv)$/))) {
-        try {
+        // Excel to PDF conversion
+        else if ((tool === "excel-to-pdf" || tool === "spreadsheet-to-pdf") && (file.mimetype.includes("spreadsheet") || file.originalname.match(/\.(xlsx|xls|csv)$/))) {
           const workbook = XLSX.read(file.buffer, { type: "buffer" });
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Courier);
-          
+
           workbook.SheetNames.forEach((sheetName) => {
             const worksheet = workbook.Sheets[sheetName];
             const csvData = XLSX.utils.sheet_to_csv(worksheet);
-            
+
             let page = pdfDoc.addPage([792, 612]); // Landscape for better table view
             let y = 570;
-            
+
             page.drawText(`Sheet: ${sheetName}`, { x: 50, y, size: 14, font, color: rgb(0, 0, 0) });
             y -= 30;
-            
+
             const rows = csvData.split("\n");
             for (const row of rows.slice(0, 40)) { // Limit to first 40 rows per sheet
               if (y < 50) {
@@ -1042,54 +1034,60 @@ docToPdfTools.forEach(tool => {
               y -= 12;
             }
           });
-          
+
           pdfBytes = Buffer.from(await pdfDoc.save());
-        } catch (err) {
-          console.error("Excel conversion error:", err);
-          // Fallback to placeholder
+        }
+        // HTML to PDF (basic)
+        else if (tool === "html-to-pdf") {
+          const htmlContent = file.buffer.toString("utf-8");
+          const textContent = htmlContent.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+          const pdfDoc = await PDFDocument.create();
+          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+          let page = pdfDoc.addPage([612, 792]);
+          let y = 750;
+
+          const lines = textContent.split("\n");
+          for (const line of lines) {
+            if (y < 50) {
+              page = pdfDoc.addPage([612, 792]);
+              y = 750;
+            }
+            const wrappedLines = line.match(/.{1,80}/g) || [line];
+            for (const wrappedLine of wrappedLines) {
+              if (y < 50) {
+                page = pdfDoc.addPage([612, 792]);
+                y = 750;
+              }
+              page.drawText(wrappedLine.trim(), { x: 50, y, size: 11, font, color: rgb(0, 0, 0) });
+              y -= 16;
+            }
+          }
+
+          pdfBytes = Buffer.from(await pdfDoc.save());
+        }
+        // Fallback for URL-based or other tools
+        else {
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           const page = pdfDoc.addPage([612, 792]);
           page.drawText(`Converted from ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
           pdfBytes = Buffer.from(await pdfDoc.save());
         }
-      }
-      // HTML to PDF (basic)
-      else if (tool === "html-to-pdf") {
-        const htmlContent = file.buffer.toString("utf-8");
-        const textContent = htmlContent.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-        
-        const pdfDoc = await PDFDocument.create();
-        const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-        let page = pdfDoc.addPage([612, 792]);
-        let y = 750;
-        
-        const lines = textContent.split("\n");
-        for (const line of lines) {
-          if (y < 50) {
-            page = pdfDoc.addPage([612, 792]);
-            y = 750;
-          }
-          const wrappedLines = line.match(/.{1,80}/g) || [line];
-          for (const wrappedLine of wrappedLines) {
-            if (y < 50) {
-              page = pdfDoc.addPage([612, 792]);
-              y = 750;
-            }
-            page.drawText(wrappedLine.trim(), { x: 50, y, size: 11, font, color: rgb(0, 0, 0) });
-            y -= 16;
-          }
+      } catch (conversionError) {
+        console.error(`${tool} conversion error:`, conversionError);
+        // Fallback: create a basic PDF with error message
+        try {
+          const pdfDoc = await PDFDocument.create();
+          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+          const page = pdfDoc.addPage([612, 792]);
+          page.drawText(`File: ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
+          page.drawText("Conversion failed - created placeholder PDF", { x: 50, y: 650, size: 12, font, color: rgb(1, 0, 0) });
+          pdfBytes = Buffer.from(await pdfDoc.save());
+        } catch (fallbackError) {
+          console.error("Fallback PDF creation failed:", fallbackError);
+          throw new Error("Unable to create PDF");
         }
-        
-        pdfBytes = Buffer.from(await pdfDoc.save());
-      }
-      // Fallback for URL-based or other tools
-      else {
-        const pdfDoc = await PDFDocument.create();
-        const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-        const page = pdfDoc.addPage([612, 792]);
-        page.drawText(`Converted from ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
-        pdfBytes = Buffer.from(await pdfDoc.save());
       }
 
       await handleConversion(req, res, {
