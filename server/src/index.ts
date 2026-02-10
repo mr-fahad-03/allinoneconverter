@@ -19,7 +19,12 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 // Middleware
 app.use(cors({
-  origin: [FRONTEND_URL, "http://localhost:3000"],
+  origin: [
+    FRONTEND_URL, 
+    "http://localhost:3000",
+    "https://allinoneconverter-phi.vercel.app", // Production frontend
+    /\.vercel\.app$/ // Allow all Vercel apps for development
+  ],
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
