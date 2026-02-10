@@ -6,6 +6,7 @@ export interface UploadResult {
   publicId: string;
   url: string;
   secureUrl: string;
+  downloadUrl: string;
   format: string;
   resourceType: string;
 }
@@ -20,7 +21,7 @@ export interface UploadResult {
 export const uploadToCloudinary = (
   buffer: Buffer,
   folder: string = "allinone-pdf",
-  resourceType: "auto" | "image" | "raw" = "auto"
+  resourceType: "auto" | "image" | "raw" = "raw"
 ): Promise<UploadResult> => {
   return new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(
@@ -28,15 +29,25 @@ export const uploadToCloudinary = (
         folder,
         resource_type: resourceType,
         public_id: uuidv4(),
+        format: resourceType === "raw" ? "pdf" : undefined,
       },
       (error, result) => {
         if (error) {
+          console.error("Cloudinary upload error:", error);
           reject(error);
         } else if (result) {
+          // Generate download URL with attachment flag
+          const downloadUrl = cloudinary.url(result.public_id, {
+            resource_type: resourceType,
+            secure: true,
+            flags: "attachment",
+          });
+          
           resolve({
             publicId: result.public_id,
             url: result.url,
             secureUrl: result.secure_url,
+            downloadUrl: downloadUrl,
             format: result.format,
             resourceType: result.resource_type,
           });
@@ -53,10 +64,17 @@ export const uploadToCloudinary = (
 /**
  * Download a file from Cloudinary by public ID
  * @param publicId - Cloudinary public ID
+ * @param resourceType - Type of resource ('auto', 'image', 'raw')
  * @returns File buffer
  */
-export const downloadFromCloudinary = async (publicId: string): Promise<Buffer> => {
-  const url = cloudinary.url(publicId, { resource_type: "auto" });
+export const downloadFromCloudinary = async (
+  publicId: string, 
+  resourceType: "auto" | "image" | "raw" = "raw"
+): Promise<Buffer> => {
+  const url = cloudinary.url(publicId, { 
+    resource_type: resourceType,
+    secure: true
+  });
   const response = await fetch(url);
   
   if (!response.ok) {

@@ -42,9 +42,13 @@ export const handleConversion = async (
 
     // Handle single file
     if (!Array.isArray(processedFile)) {
+      // Determine resource type based on mimetype
+      const resourceType = processedFile.mimetype?.startsWith("image/") ? "image" : "raw";
+      
       const uploadResult = await uploadToCloudinary(
         processedFile.buffer,
-        isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp"
+        isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp",
+        resourceType
       );
 
       result = {
@@ -52,7 +56,7 @@ export const handleConversion = async (
         file: {
           publicId: uploadResult.publicId,
           originalName: processedFile.filename,
-          url: uploadResult.secureUrl,
+          url: uploadResult.downloadUrl,
           size: processedFile.buffer.length,
         },
       };
@@ -60,7 +64,7 @@ export const handleConversion = async (
       // For guest users, delete files after a delay (client needs time to download)
       if (!isAuthenticated) {
         setTimeout(async () => {
-          await deleteFromCloudinary(uploadResult.publicId);
+          await deleteFromCloudinary(uploadResult.publicId, resourceType === "image" ? "image" : "raw");
           if (inputPublicIds.length > 0) {
             await deleteMultipleFromCloudinary(inputPublicIds);
           }
@@ -69,18 +73,20 @@ export const handleConversion = async (
     }
     // Handle multiple files
     else {
-      const uploadPromises = processedFile.map(file =>
-        uploadToCloudinary(
+      const uploadPromises = processedFile.map(file => {
+        const resourceType = file.mimetype?.startsWith("image/") ? "image" : "raw";
+        return uploadToCloudinary(
           file.buffer,
-          isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp"
-        )
-      );
+          isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp",
+          resourceType
+        );
+      });
       const uploadResults = await Promise.all(uploadPromises);
 
       const files = processedFile.map((file, index) => ({
         publicId: uploadResults[index].publicId,
         originalName: file.filename,
-        url: uploadResults[index].secureUrl,
+        url: uploadResults[index].downloadUrl,
         size: file.buffer.length,
       }));
 

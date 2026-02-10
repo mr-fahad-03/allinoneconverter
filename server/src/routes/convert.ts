@@ -71,12 +71,22 @@ router.post("/merge-pdf", optionalAuth, upload.array("files", 20), async (req: A
 
     const mergedPdf = await PDFDocument.create();
     for (const file of files) {
-      const pdf = await PDFDocument.load(file.buffer);
-      const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-      pages.forEach((page) => mergedPdf.addPage(page));
+      try {
+        const pdf = await PDFDocument.load(file.buffer);
+        const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
+        pages.forEach((page) => mergedPdf.addPage(page));
+      } catch (error) {
+        console.error(`Error loading PDF file ${file.originalname}:`, error);
+        throw new Error(`Invalid PDF file: ${file.originalname}`);
+      }
     }
 
     const pdfBytes = await mergedPdf.save();
+
+    // Validate the generated PDF
+    if (!pdfBytes || pdfBytes.length === 0) {
+      throw new Error("Failed to generate PDF - empty output");
+    }
 
     await handleConversion(req, res, {
       buffer: Buffer.from(pdfBytes),
@@ -85,7 +95,9 @@ router.post("/merge-pdf", optionalAuth, upload.array("files", 20), async (req: A
     });
   } catch (error) {
     console.error("Merge PDF error:", error);
-    res.status(500).json({ message: "Merge failed. Please ensure all files are valid PDFs." });
+    res.status(500).json({ 
+      message: error instanceof Error ? error.message : "Merge failed. Please ensure all files are valid PDFs." 
+    });
   }
 });
 
