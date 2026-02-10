@@ -1202,7 +1202,17 @@ router.post("/speech-to-pdf", optionalAuth, upload.single("file"), async (req: A
     
     y -= 40;
     
-    const note = [\n      \"Note: Full speech-to-text transcription requires an AI service like:\",\n      \"- OpenAI Whisper API\",\n      \"- Google Cloud Speech-to-Text\",\n      \"- AssemblyAI\",\n      \"\",\n      \"Audio file received successfully. To enable transcription,\",\n      \"integrate one of the above services in production.\"\n    ];\n    \n    for (const line of note) {\n      page.drawText(line, {\n        x: 50,\n        y,\n        size: 11,\n        font\n      });\n      y -= 20;\n    }\n\n    const pdfBytes = await pdfDoc.save();\n\n    await handleConversion(req, res, {\n      buffer: Buffer.from(pdfBytes),\n      filename: file.originalname.replace(/\.[^.]+$/, \"_transcription.pdf\"),\n      mimetype: \"application/pdf\"\n    });\n  } catch (error) {\n    console.error(\"Speech to PDF error:\", error);\n    res.status(500).json({ message: \"Conversion failed\" });\n  }\n});
+    const note = [
+      "Note: Full speech-to-text transcription requires an AI service like:",
+      "- OpenAI Whisper API",
+      "- Google Cloud Speech-to-Text",
+      "- AssemblyAI",
+      "",
+      "Audio file received successfully. To enable transcription,",
+      "integrate one of the above services in production."
+    ];
+    
+    for (const line of note) {\n      page.drawText(line, {\n        x: 50,\n        y,\n        size: 11,\n        font\n      });\n      y -= 20;\n    }\n\n    const pdfBytes = await pdfDoc.save();\n\n    await handleConversion(req, res, {\n      buffer: Buffer.from(pdfBytes),\n      filename: file.originalname.replace(/\.[^.]+$/, \"_transcription.pdf\"),\n      mimetype: \"application/pdf\"\n    });\n  } catch (error) {\n    console.error(\"Speech to PDF error:\", error);\n    res.status(500).json({ message: \"Conversion failed\" });\n  }\n});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONVERT FROM PDF TOOLS (22 tools)
@@ -2284,7 +2294,7 @@ router.post("/invoice-generator", optionalAuth, upload.none(), async (req: AuthR
     // Items
     const items = Array.isArray(invoiceData.items) ? invoiceData.items : [invoiceData.items];
     for (const item of items) {
-      const desc = item.description || \"Item\";
+      const desc = item.description || "Item";
       const qty = item.quantity || 1;
       const price = item.price || 0;
       const total = qty * price;
