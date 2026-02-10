@@ -117,7 +117,7 @@ export function ToolFileUpload({
 
     convertedFiles.forEach((file) => {
       const link = document.createElement("a");
-      link.href = `${API_URL}${file.url}`;
+      link.href = file.url; // Use Cloudinary URL directly
       link.download = file.originalName;
       document.body.appendChild(link);
       link.click();
