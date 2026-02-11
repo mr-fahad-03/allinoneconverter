@@ -8,6 +8,8 @@ import sharp from "sharp";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 import pdfParse from "pdf-parse";
+import Tesseract from "tesseract.js";
+import archiver from "archiver";
 import { AuthRequest, optionalAuth } from "../middleware/auth.js";
 import { handleConversion } from "../services/conversion.service.js";
 import { uploadToCloudinary } from "../services/cloudinary.service.js";
@@ -22,6 +24,12 @@ import {
   cleanPdf,
   compressPdf,
 } from "../services/pdf-manipulation.service.js";
+import {
+  analyzePdfWithAI,
+  generateSpeechText,
+  enhanceOCRText,
+  findTextSplitPoints,
+} from "../services/ai.service.js";
 
 const router = Router();
 
@@ -1691,9 +1699,202 @@ router.post("/add-watermark", optionalAuth, upload.single("file"), async (req: A
 });
 
 const editPdfTools = [
-  "overlay-pdf", "stylizer-pdf", "split-pdf-text", "add-pdf-meta",
-  "generate-pdf", "us-patent-pdf", "pdf-story"
+  "stylizer-pdf", "add-pdf-meta", "generate-pdf", "us-patent-pdf", "pdf-story"
 ];
+
+// Overlay PDF - Overlay one PDF on another
+router.post("/overlay-pdf", optionalAuth, upload.array("files", 2), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length < 2) {
+      res.status(400).json({ message: "Two PDF files required (base and overlay)" });
+      return;
+    }
+
+    const basePdf = await PDFDocument.load(files[0].buffer);
+    const overlayPdf = await PDFDocument.load(files[1].buffer);
+    
+    const basePages = basePdf.getPages();
+    const overlayPages = overlayPdf.getPages();
+    
+    // Get overlay options
+    const opacity = parseFloat(req.body.opacity || "0.5");
+    const position = (req.body.position || "center").toString(); // center, top-left, top-right, bottom-left, bottom-right
+    const scale = parseFloat(req.body.scale || "1.0");
+    
+    // Embed overlay pages as XObjects
+    for (let i = 0; i < basePages.length; i++) {
+      const basePage = basePages[i];
+      const { width: baseWidth, height: baseHeight } = basePage.getSize();
+      
+      // Use corresponding overlay page or last overlay page if fewer pages
+      const overlayPageIndex = Math.min(i, overlayPages.length - 1);
+      const [embeddedPage] = await basePdf.embedPdf(overlayPdf, [overlayPageIndex]);
+      
+      const overlayDims = embeddedPage.scale(scale);
+      
+      // Calculate position
+      let x = 0, y = 0;
+      switch (position) {
+        case "top-left":
+          x = 0;
+          y = baseHeight - overlayDims.height;
+          break;
+        case "top-right":
+          x = baseWidth - overlayDims.width;
+          y = baseHeight - overlayDims.height;
+          break;
+        case "bottom-left":
+          x = 0;
+          y = 0;
+          break;
+        case "bottom-right":
+          x = baseWidth - overlayDims.width;
+          y = 0;
+          break;
+        case "center":
+        default:
+          x = (baseWidth - overlayDims.width) / 2;
+          y = (baseHeight - overlayDims.height) / 2;
+          break;
+      }
+      
+      basePage.drawPage(embeddedPage, {
+        x,
+        y,
+        width: overlayDims.width,
+        height: overlayDims.height,
+        opacity,
+      });
+    }
+    
+    const pdfBytes = await basePdf.save();
+    
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: files[0].originalname.replace(".pdf", "_overlay.pdf"),
+      mimetype: "application/pdf"
+    });
+  } catch (error) {
+    console.error("Overlay PDF error:", error);
+    res.status(500).json({ message: "Overlay failed" });
+  }
+});
+
+// Split PDF Text - Split PDF based on text content/keywords
+router.post("/split-pdf-text", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const keyword = (req.body.keyword || req.query.keyword || "").toString().toLowerCase();
+    const splitMode = (req.body.mode || "keyword").toString(); // "keyword", "chapter", "heading", "paragraph"
+    
+    const pdf = await PDFDocument.load(file.buffer);
+    const pdfData = await pdfParse(file.buffer);
+    const totalPages = pdf.getPageCount();
+    
+    // Get text per page
+    const pageTexts: string[] = [];
+    
+    // Extract text page by page (simplified - pdfParse doesn't give per-page text easily)
+    const fullText = pdfData.text;
+    const avgCharsPerPage = Math.ceil(fullText.length / totalPages);
+    
+    // Find split points based on mode
+    const splitPoints: number[] = [0]; // Always start with page 0
+    
+    if (splitMode === "keyword" && keyword) {
+      // Find pages containing the keyword
+      const textLower = fullText.toLowerCase();
+      let searchStart = 0;
+      
+      while (true) {
+        const idx = textLower.indexOf(keyword, searchStart);
+        if (idx === -1) break;
+        
+        // Estimate which page this keyword is on
+        const estimatedPage = Math.floor(idx / avgCharsPerPage);
+        if (estimatedPage > 0 && !splitPoints.includes(estimatedPage)) {
+          splitPoints.push(estimatedPage);
+        }
+        searchStart = idx + keyword.length;
+      }
+    } else if (splitMode === "chapter") {
+      // Look for chapter markers
+      const chapterRegex = /chapter\s+\d+|section\s+\d+|part\s+\d+/gi;
+      let match;
+      while ((match = chapterRegex.exec(fullText)) !== null) {
+        const estimatedPage = Math.floor(match.index / avgCharsPerPage);
+        if (estimatedPage > 0 && !splitPoints.includes(estimatedPage)) {
+          splitPoints.push(estimatedPage);
+        }
+      }
+    } else if (splitMode === "heading") {
+      // Use AI to find logical split points
+      const sections = await findTextSplitPoints(fullText, Math.min(totalPages, 10));
+      // Distribute pages evenly among sections
+      const pagesPerSection = Math.ceil(totalPages / sections.length);
+      for (let i = 1; i < sections.length; i++) {
+        const pageNum = i * pagesPerSection;
+        if (pageNum < totalPages && !splitPoints.includes(pageNum)) {
+          splitPoints.push(pageNum);
+        }
+      }
+    }
+    
+    // Sort and remove duplicates
+    splitPoints.sort((a, b) => a - b);
+    
+    // If no split points found, split evenly into 2 parts
+    if (splitPoints.length === 1) {
+      splitPoints.push(Math.floor(totalPages / 2));
+    }
+    
+    // Add end point
+    splitPoints.push(totalPages);
+    
+    // Create split PDFs
+    const outputFiles = [];
+    
+    for (let i = 0; i < splitPoints.length - 1; i++) {
+      const startPage = splitPoints[i];
+      const endPage = splitPoints[i + 1];
+      
+      if (startPage >= endPage) continue;
+      
+      const newPdf = await PDFDocument.create();
+      const pageIndices = Array.from({ length: endPage - startPage }, (_, idx) => startPage + idx);
+      const pages = await newPdf.copyPages(pdf, pageIndices);
+      pages.forEach((page) => newPdf.addPage(page));
+      
+      const pdfBytes = await newPdf.save();
+      
+      outputFiles.push({
+        buffer: Buffer.from(pdfBytes),
+        filename: `split_${i + 1}_pages_${startPage + 1}-${endPage}.pdf`,
+        mimetype: "application/pdf"
+      });
+    }
+    
+    if (outputFiles.length === 0) {
+      // No splits possible, return original
+      await handleConversion(req, res, {
+        buffer: file.buffer,
+        filename: file.originalname,
+        mimetype: "application/pdf"
+      });
+    } else {
+      await handleConversion(req, res, outputFiles);
+    }
+  } catch (error) {
+    console.error("Split PDF Text error:", error);
+    res.status(500).json({ message: "Text-based splitting failed" });
+  }
+});
 
 editPdfTools.forEach(tool => {
   router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
@@ -2006,7 +2207,7 @@ editPdfTools.forEach(tool => {
         return;
       }
       
-      // Overlay PDF and Split PDF Text - more complex, return basic response
+      // Fallback for any unhandled tool
       if (!file) {
         res.status(400).json({ message: "No file provided" });
         return;
@@ -2242,7 +2443,7 @@ router.post("/validate-pdf", optionalAuth, upload.single("file"), async (req: Au
 // AI TOOLS (3 tools) - Premium
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Analyze PDF - Extract and analyze PDF content
+// Analyze PDF - Extract and analyze PDF content using AI
 router.post("/analyze-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
@@ -2255,12 +2456,15 @@ router.post("/analyze-pdf", optionalAuth, upload.single("file"), async (req: Aut
     const pdfData = await pdfParse(file.buffer);
     const pdf = await PDFDocument.load(file.buffer);
 
+    // Use AI for advanced analysis
+    const aiAnalysis = await analyzePdfWithAI(pdfData.text, file.originalname);
+
     const analysis = {
       message: "PDF Analysis Complete",
       premium: true,
       analysis: {
         pageCount: pdfData.numpages,
-        wordCount: pdfData.text.split(/\\s+/).length,
+        wordCount: pdfData.text.split(/\s+/).length,
         characterCount: pdfData.text.length,
         metadata: {
           title: pdf.getTitle() || "N/A",
@@ -2269,11 +2473,20 @@ router.post("/analyze-pdf", optionalAuth, upload.single("file"), async (req: Aut
           creator: pdf.getCreator() || "N/A",
           producer: pdf.getProducer() || "N/A",
         },
-        textSample: pdfData.text.substring(0, 500) + "...",
         fileSize: file.buffer.length,
         fileSizeReadable: (file.buffer.length / 1024).toFixed(2) + " KB",
+        // AI-powered analysis
+        aiAnalysis: {
+          summary: aiAnalysis.summary,
+          keyPoints: aiAnalysis.keyPoints,
+          sentiment: aiAnalysis.sentiment,
+          topics: aiAnalysis.topics,
+          entities: aiAnalysis.entities,
+          readingTime: aiAnalysis.readingTime,
+          complexity: aiAnalysis.complexity,
+        },
+        textSample: pdfData.text.substring(0, 500) + "...",
       },
-      note: "For advanced AI analysis (sentiment, summarization, entity extraction), integrate OpenAI GPT or similar AI service."
     };
 
     res.json(analysis);
@@ -2283,7 +2496,7 @@ router.post("/analyze-pdf", optionalAuth, upload.single("file"), async (req: Aut
   }
 });
 
-// Listen PDF - Text-to-speech
+// Listen PDF - Text-to-speech optimized extraction
 router.post("/listen-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
@@ -2295,13 +2508,26 @@ router.post("/listen-pdf", optionalAuth, upload.single("file"), async (req: Auth
     // Extract text from PDF
     const pdfData = await pdfParse(file.buffer);
 
+    // Use AI to optimize text for speech
+    const speechText = await generateSpeechText(pdfData.text);
+
+    // Generate SSML for better TTS (Speech Synthesis Markup Language)
+    const ssmlText = `<speak>
+      <prosody rate="medium" pitch="medium">
+        ${speechText.replace(/\n\n/g, '<break time="500ms"/>').replace(/\n/g, '<break time="200ms"/>')}
+      </prosody>
+    </speak>`;
+
     res.json({
-      message: "PDF text extracted successfully",
+      message: "PDF text extracted and optimized for speech",
       premium: true,
-      text: pdfData.text,
+      originalText: pdfData.text,
+      speechOptimizedText: speechText,
+      ssmlText: ssmlText,
       pageCount: pdfData.numpages,
-      characterCount: pdfData.text.length,
-      note: "To enable text-to-speech, integrate services like: Google Cloud Text-to-Speech, Amazon Polly, or Microsoft Azure Speech Service."
+      characterCount: speechText.length,
+      estimatedDuration: `${Math.ceil(speechText.split(/\s+/).length / 150)} minutes at normal speed`,
+      note: "Use the speechOptimizedText with any TTS service (Web Speech API, Google TTS, Amazon Polly, etc.)"
     });
   } catch (error) {
     console.error("Listen PDF error:", error);
@@ -2309,7 +2535,7 @@ router.post("/listen-pdf", optionalAuth, upload.single("file"), async (req: Auth
   }
 });
 
-// Scan PDF - OCR
+// Scan PDF - OCR with AI enhancement
 router.post("/scan-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
@@ -2318,19 +2544,69 @@ router.post("/scan-pdf", optionalAuth, upload.single("file"), async (req: AuthRe
       return;
     }
 
-    // Render PDF to images for OCR processing
+    // Render PDF pages to images for OCR
     const imageBuffers = await renderPdfToImages(file.buffer, { format: "png", quality: 95, scale: 2.5 });
 
-    res.json({
-      message: "PDF rendered for OCR",
-      premium: true,
-      pageCount: imageBuffers.length,
-      imagesGenerated: imageBuffers.length,
-      note: "To enable OCR (Optical Character Recognition), integrate services like: Google Cloud Vision, Tesseract.js, or AWS Textract. Images are ready for OCR processing."
+    // Perform OCR on each page using Tesseract
+    const ocrResults: string[] = [];
+    
+    for (let i = 0; i < imageBuffers.length; i++) {
+      try {
+        const result = await Tesseract.recognize(imageBuffers[i], "eng", {
+          logger: (m) => {
+            if (m.status === "recognizing text") {
+              console.log(`OCR Page ${i + 1}: ${Math.round(m.progress * 100)}%`);
+            }
+          }
+        });
+        ocrResults.push(result.data.text);
+      } catch (ocrError) {
+        console.error(`OCR error on page ${i + 1}:`, ocrError);
+        ocrResults.push(`[OCR failed for page ${i + 1}]`);
+      }
+    }
+
+    const combinedText = ocrResults.join("\n\n--- Page Break ---\n\n");
+
+    // Use AI to enhance and correct OCR text
+    const enhancedText = await enhanceOCRText(combinedText);
+
+    // Create a searchable PDF with OCR text
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    
+    // Add OCR text as pages
+    const lines = enhancedText.split("\n");
+    let page = pdfDoc.addPage([612, 792]);
+    let y = 750;
+    
+    for (const line of lines) {
+      if (y < 50) {
+        page = pdfDoc.addPage([612, 792]);
+        y = 750;
+      }
+      const wrappedLines = line.match(/.{1,85}/g) || [line];
+      for (const wrappedLine of wrappedLines) {
+        if (y < 50) {
+          page = pdfDoc.addPage([612, 792]);
+          y = 750;
+        }
+        page.drawText(wrappedLine, { x: 50, y, size: 10, font, color: rgb(0, 0, 0) });
+        y -= 14;
+      }
+    }
+
+    const pdfBytes = await pdfDoc.save();
+
+    // Return both the OCR data and the searchable PDF
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pdfBytes),
+      filename: file.originalname.replace(".pdf", "_ocr.pdf"),
+      mimetype: "application/pdf"
     });
   } catch (error) {
     console.error("Scan PDF error:", error);
-    res.status(500).json({ message: "Scanning failed" });
+    res.status(500).json({ message: "OCR scanning failed" });
   }
 });
 

@@ -36,11 +36,12 @@ export const uploadToCloudinary = (
           console.error("Cloudinary upload error:", error);
           reject(error);
         } else if (result) {
-          // Generate download URL with attachment flag
+          // Generate download URL with attachment flag and signing
           const downloadUrl = cloudinary.url(result.public_id, {
             resource_type: resourceType,
             secure: true,
             flags: "attachment",
+            sign_url: true,
           });
           
           resolve({
@@ -73,7 +74,8 @@ export const downloadFromCloudinary = async (
 ): Promise<Buffer> => {
   const url = cloudinary.url(publicId, { 
     resource_type: resourceType,
-    secure: true
+    secure: true,
+    sign_url: true,
   });
   const response = await fetch(url);
   
