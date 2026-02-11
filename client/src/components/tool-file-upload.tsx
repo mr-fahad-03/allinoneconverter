@@ -118,13 +118,9 @@ export function ToolFileUpload({
 
     for (const file of convertedFiles) {
       try {
-        // Use server proxy with publicId for reliable signed downloads
+        // Use server proxy with the signed URL for reliable downloads
         const params = new URLSearchParams();
-        if (file.publicId) {
-          params.set('publicId', file.publicId);
-        } else {
-          params.set('url', file.url);
-        }
+        params.set('url', file.url);
         params.set('filename', file.originalName);
         const proxyUrl = `${API_URL}/api/convert/download?${params.toString()}`;
         const response = await fetch(proxyUrl);

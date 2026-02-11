@@ -38,23 +38,25 @@ export const uploadToCloudinary = (
           console.error("Cloudinary upload error:", error);
           reject(error);
         } else if (result) {
-          // Generate a signed URL for raw files since Cloudinary requires authentication
           // For raw files, append the format to the public_id
           const publicIdWithFormat = resourceType === "raw" && result.format 
             ? `${result.public_id}.${result.format}`
             : result.public_id;
-            
+          
+          // Generate a signed URL with the correct version from upload result
           const signedUrl = cloudinary.url(publicIdWithFormat, {
             resource_type: resourceType,
             type: "upload",
             secure: true,
             sign_url: true,
+            version: result.version, // Include the correct version
           });
           
+          console.log("Upload result version:", result.version);
           console.log("Generated signed URL:", signedUrl);
           
           resolve({
-            publicId: publicIdWithFormat, // Include format in publicId for consistent downloads
+            publicId: publicIdWithFormat,
             url: result.url,
             secureUrl: result.secure_url,
             downloadUrl: signedUrl,
