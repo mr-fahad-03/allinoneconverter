@@ -36,13 +36,13 @@ export const uploadToCloudinary = (
           console.error("Cloudinary upload error:", error);
           reject(error);
         } else if (result) {
-          // Generate download URL with attachment flag and signing
-          const downloadUrl = cloudinary.url(result.public_id, {
-            resource_type: resourceType,
-            secure: true,
-            flags: "attachment",
-            sign_url: true,
-          });
+          // Generate download URL with attachment flag
+          // Use the secure_url directly and append fl_attachment for download
+          // This avoids issues with signed URLs for raw files
+          const downloadUrl = result.secure_url.replace(
+            "/upload/",
+            "/upload/fl_attachment/"
+          );
           
           resolve({
             publicId: result.public_id,
