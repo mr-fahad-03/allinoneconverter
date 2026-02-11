@@ -125,13 +125,20 @@ export function FileUpload({
 
     for (const file of uploadedFiles) {
       try {
-        // Use server proxy with the signed URL for reliable downloads
+        // Use server proxy with publicId for server-side authenticated URL generation
         const params = new URLSearchParams();
-        params.set('url', file.url);
+        if (file.publicId) {
+          params.set('publicId', file.publicId);
+        } else {
+          params.set('url', file.url);
+        }
         params.set('filename', file.originalName);
         const proxyUrl = `${API_URL}/api/convert/download?${params.toString()}`;
         const response = await fetch(proxyUrl);
-        if (!response.ok) throw new Error('Download failed');
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          throw new Error(errorData.message || 'Download failed');
+        }
         const blob = await response.blob();
         const blobUrl = window.URL.createObjectURL(blob);
         
@@ -146,8 +153,7 @@ export function FileUpload({
         window.URL.revokeObjectURL(blobUrl);
       } catch (err) {
         console.error('Download error:', err);
-        // Fallback: open in new tab
-        window.open(file.url, '_blank');
+        setError(err instanceof Error ? err.message : 'Download failed');
       }
     }
   };

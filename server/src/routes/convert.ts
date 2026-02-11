@@ -3432,23 +3432,39 @@ router.post("/margin-crop", optionalAuth, upload.single("file"), async (req: Aut
 // Download proxy endpoint - handles cross-origin downloads
 router.get("/download", async (req: Request, res: Response) => {
   try {
-    const { url, filename } = req.query;
+    const { url, publicId, filename } = req.query;
     
-    if (!url || typeof url !== "string") {
-      res.status(400).json({ message: "URL is required" });
+    let fetchUrl: string;
+    
+    if (publicId && typeof publicId === "string") {
+      // Generate a fresh authenticated download URL using Cloudinary's private_download_url
+      const cloudinary = (await import("../config/cloudinary.js")).default;
+      fetchUrl = cloudinary.utils.private_download_url(
+        publicId,
+        "",
+        {
+          resource_type: "raw",
+          type: "upload",
+          expires_at: Math.floor(Date.now() / 1000) + 300, // 5 min expiry
+        }
+      );
+      console.log("Generated private download URL for publicId:", publicId);
+    } else if (url && typeof url === "string") {
+      // Validate URL is from Cloudinary
+      if (!url.includes("cloudinary.com")) {
+        res.status(400).json({ message: "Invalid download URL" });
+        return;
+      }
+      fetchUrl = url;
+    } else {
+      res.status(400).json({ message: "URL or publicId is required" });
       return;
     }
     
-    // Validate URL is from Cloudinary
-    if (!url.includes("cloudinary.com")) {
-      res.status(400).json({ message: "Invalid download URL" });
-      return;
-    }
+    console.log("Download proxy fetching:", fetchUrl);
     
-    console.log("Download proxy fetching:", url);
-    
-    // Fetch the file from Cloudinary using the signed URL
-    const response = await fetch(url);
+    // Fetch the file from Cloudinary
+    const response = await fetch(fetchUrl);
     
     if (!response.ok) {
       console.error("Cloudinary fetch failed:", response.status, response.statusText);
