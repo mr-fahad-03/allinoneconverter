@@ -7,7 +7,7 @@ import { PDFDocument, rgb, degrees as pdfDegrees, StandardFonts } from "pdf-lib"
 import sharp from "sharp";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
-import pdfParseModule from "pdf-parse";
+import * as pdfParseModule from "pdf-parse";
 const pdfParse = (pdfParseModule as any).default || pdfParseModule;
 import { AuthRequest, optionalAuth } from "../middleware/auth.js";
 import { handleConversion } from "../services/conversion.service.js";
@@ -970,26 +970,51 @@ docToPdfTools.forEach(tool => {
 
       console.log(`Starting conversion for tool: ${tool}, file: ${file.originalname}, size: ${file.buffer.length}, mimetype: ${file.mimetype}`);
 
+      // Validate file buffer
+      if (!file.buffer || file.buffer.length === 0) {
+        console.error("Empty or invalid file buffer");
+        res.status(400).json({ message: "Invalid file: empty or corrupted" });
+        return;
+      }
+
       let pdfBytes: Buffer;
 
       try {
         // Word to PDF conversion
         if (tool === "word-to-pdf") {
           console.log(`Processing as Word file: ${file.originalname}, mimetype: ${file.mimetype}, buffer size: ${file.buffer.length}`);
-          const result = await mammoth.extractRawText({ buffer: file.buffer });
-          console.log(`Mammoth extraction result:`, { hasValue: !!result.value, valueLength: result.value?.length, messages: result.messages });
-          const text = result.value;
 
-          if (!text || text.trim().length === 0) {
-            throw new Error("No text content found in Word document");
+          let text = "";
+          try {
+            const result = await mammoth.extractRawText({ buffer: file.buffer });
+            console.log(`Mammoth extraction result:`, {
+              hasValue: !!result.value,
+              valueLength: result.value?.length,
+              messages: result.messages?.length || 0
+            });
+            text = result.value || "";
+
+            // If no text extracted, try alternative approach
+            if (!text.trim()) {
+              console.log("No text extracted, trying alternative method...");
+              // For now, just use filename as content
+              text = `Content from ${file.originalname}\n\nUnable to extract text from this Word document.`;
+            }
+          } catch (mammothError: unknown) {
+            console.error("Mammoth extraction failed:", mammothError);
+            const errorMessage = mammothError instanceof Error ? mammothError.message : String(mammothError);
+            text = `Content from ${file.originalname}\n\nUnable to extract text from this Word document.\nError: ${errorMessage}`;
           }
 
+          console.log(`Final text length: ${text.length}`);
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           let page = pdfDoc.addPage([612, 792]);
           let y = 750;
 
           const lines = text.split("\n");
+          console.log(`Processing ${lines.length} lines of text`);
+
           for (const line of lines) {
             if (y < 50) {
               page = pdfDoc.addPage([612, 792]);
@@ -1007,6 +1032,7 @@ docToPdfTools.forEach(tool => {
           }
 
           pdfBytes = Buffer.from(await pdfDoc.save());
+          console.log(`PDF created successfully, size: ${pdfBytes.length} bytes`);
         }
         // Excel to PDF conversion
         else if ((tool === "excel-to-pdf" || tool === "spreadsheet-to-pdf") && (file.mimetype.includes("spreadsheet") || file.originalname.match(/\.(xlsx|xls|csv)$/))) {
@@ -1074,27 +1100,68 @@ docToPdfTools.forEach(tool => {
           page.drawText(`Converted from ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
           pdfBytes = Buffer.from(await pdfDoc.save());
         }
-      } catch (conversionError) {
+      } catch (conversionError: unknown) {
         console.error(`${tool} conversion error:`, conversionError);
+        const errorMessage = conversionError instanceof Error ? conversionError.message : String(conversionError);
+        const errorStack = conversionError instanceof Error ? conversionError.stack : undefined;
+        console.error("Error details:", {
+          message: errorMessage,
+          stack: errorStack,
+          fileInfo: {
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            size: file.buffer.length
+          }
+        });
+
         // Fallback: create a basic PDF with error message
         try {
+          console.log("Creating fallback PDF...");
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
           const page = pdfDoc.addPage([612, 792]);
           page.drawText(`File: ${file.originalname}`, { x: 50, y: 700, size: 16, font, color: rgb(0, 0, 0) });
           page.drawText("Conversion failed - created placeholder PDF", { x: 50, y: 650, size: 12, font, color: rgb(1, 0, 0) });
+          const errorMsg = conversionError instanceof Error ? conversionError.message : String(conversionError);
+          page.drawText(`Error: ${errorMsg}`, { x: 50, y: 600, size: 10, font, color: rgb(1, 0, 0) });
           pdfBytes = Buffer.from(await pdfDoc.save());
+          console.log("Fallback PDF created successfully, size:", pdfBytes.length);
         } catch (fallbackError) {
           console.error("Fallback PDF creation failed:", fallbackError);
-          throw new Error("Unable to create PDF");
+          // Last resort: create a minimal PDF
+          try {
+            const pdfDoc = await PDFDocument.create();
+            const page = pdfDoc.addPage([612, 792]);
+            pdfBytes = Buffer.from(await pdfDoc.save());
+            console.log("Minimal fallback PDF created");
+          } catch (minimalError) {
+            console.error("Even minimal PDF creation failed:", minimalError);
+            throw new Error("Unable to create PDF");
+          }
         }
       }
 
-      await handleConversion(req, res, {
-        buffer: pdfBytes,
-        filename: file.originalname.replace(/\.[^.]+$/, ".pdf"),
-        mimetype: "application/pdf"
-      });
+      // Validate pdfBytes before proceeding
+      if (!pdfBytes || pdfBytes.length === 0) {
+        console.error("pdfBytes is empty or invalid");
+        res.status(500).json({ message: "Failed to generate PDF content" });
+        return;
+      }
+
+      console.log(`Final PDF size: ${pdfBytes.length} bytes, calling handleConversion`);
+
+      try {
+        await handleConversion(req, res, {
+          buffer: pdfBytes,
+          filename: file.originalname.replace(/\.[^.]+$/, ".pdf"),
+          mimetype: "application/pdf"
+        });
+        console.log("handleConversion completed successfully");
+      } catch (handleError: unknown) {
+        console.error("handleConversion failed:", handleError);
+        const errorMessage = handleError instanceof Error ? handleError.message : String(handleError);
+        res.status(500).json({ message: "File upload failed", error: errorMessage });
+      }
     } catch (error) {
       console.error(`${tool} error:`, error);
       res.status(500).json({ message: "Conversion failed" });
