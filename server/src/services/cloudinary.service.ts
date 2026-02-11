@@ -54,7 +54,7 @@ export const uploadToCloudinary = (
           console.log("Generated signed URL:", signedUrl);
           
           resolve({
-            publicId: result.public_id,
+            publicId: publicIdWithFormat, // Include format in publicId for consistent downloads
             url: result.url,
             secureUrl: result.secure_url,
             downloadUrl: signedUrl,

@@ -12,6 +12,7 @@ interface UploadedFile {
   filename: string;
   originalName: string;
   url: string;
+  publicId?: string;
 }
 
 interface FileUploadProps {
@@ -124,8 +125,15 @@ export function FileUpload({
 
     for (const file of uploadedFiles) {
       try {
-        // Use server proxy for reliable cross-origin downloads
-        const proxyUrl = `${API_URL}/api/convert/download?url=${encodeURIComponent(file.url)}&filename=${encodeURIComponent(file.originalName)}`;
+        // Use server proxy with publicId for reliable signed downloads
+        const params = new URLSearchParams();
+        if (file.publicId) {
+          params.set('publicId', file.publicId);
+        } else {
+          params.set('url', file.url);
+        }
+        params.set('filename', file.originalName);
+        const proxyUrl = `${API_URL}/api/convert/download?${params.toString()}`;
         const response = await fetch(proxyUrl);
         if (!response.ok) throw new Error('Download failed');
         const blob = await response.blob();
