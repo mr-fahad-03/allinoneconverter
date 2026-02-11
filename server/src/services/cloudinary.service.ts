@@ -38,14 +38,26 @@ export const uploadToCloudinary = (
           console.error("Cloudinary upload error:", error);
           reject(error);
         } else if (result) {
-          // For raw files, transformations like fl_attachment are NOT supported
-          // Just use the secure_url directly - download handling should be done client-side
-          // or through a proxy endpoint
+          // Generate a signed URL for raw files since Cloudinary requires authentication
+          // For raw files, append the format to the public_id
+          const publicIdWithFormat = resourceType === "raw" && result.format 
+            ? `${result.public_id}.${result.format}`
+            : result.public_id;
+            
+          const signedUrl = cloudinary.url(publicIdWithFormat, {
+            resource_type: resourceType,
+            type: "upload",
+            secure: true,
+            sign_url: true,
+          });
+          
+          console.log("Generated signed URL:", signedUrl);
+          
           resolve({
             publicId: result.public_id,
             url: result.url,
             secureUrl: result.secure_url,
-            downloadUrl: result.secure_url,
+            downloadUrl: signedUrl,
             format: result.format,
             resourceType: result.resource_type,
           });
