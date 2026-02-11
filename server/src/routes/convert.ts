@@ -7,8 +7,7 @@ import { PDFDocument, rgb, degrees as pdfDegrees, StandardFonts } from "pdf-lib"
 import sharp from "sharp";
 import mammoth from "mammoth";
 import * as XLSX from "xlsx";
-import * as pdfParseModule from "pdf-parse";
-const pdfParse = (pdfParseModule as any).default || pdfParseModule;
+import pdfParse from "pdf-parse";
 import { AuthRequest, optionalAuth } from "../middleware/auth.js";
 import { handleConversion } from "../services/conversion.service.js";
 import { uploadToCloudinary } from "../services/cloudinary.service.js";

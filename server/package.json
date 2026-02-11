@@ -25,15 +25,14 @@
     "mongoose": "^9.1.6",
     "multer": "^2.0.2",
     "pdf-lib": "^1.17.1",
-    "pdf-parse": "^2.4.5",
+    "pdf-parse": "^1.1.1",
     "sharp": "^0.34.5",
     "streamifier": "^0.1.1",
     "uuid": "^13.0.0",
     "xlsx": "^0.18.5"
   },
   "optionalDependencies": {
-    "canvas": "^3.2.1",
-    "pdfjs-dist": "^5.4.624"
+    "canvas": "^3.2.1"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
