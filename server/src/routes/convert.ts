@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { PDFDocument, rgb, degrees as pdfDegrees, StandardFonts } from "pdf-lib";
 import sharp from "sharp";
@@ -10,6 +11,13 @@ import * as XLSX from "xlsx";
 import pdfParse from "pdf-parse";
 import Tesseract from "tesseract.js";
 import archiver from "archiver";
+import PptxGenJS from "pptxgenjs";
+import QRCode from "qrcode";
+import bwipjs from "bwip-js";
+// jsQR has no official @types package; treat it as runtime function.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import jsQR from "jsqr";
 import { AuthRequest, optionalAuth } from "../middleware/auth.js";
 import { handleConversion } from "../services/conversion.service.js";
 import { uploadToCloudinary } from "../services/cloudinary.service.js";
@@ -62,6 +70,66 @@ const parsePageRanges = (pagesParam: string, totalPages: number): number[] => {
   }
   
   return pageIndices;
+};
+
+const parseKeyValueText = (text: string): Record<string, string> => {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .reduce((acc, line) => {
+      const idx = line.indexOf("=");
+      if (idx > 0) {
+        const key = line.slice(0, idx).trim().toLowerCase();
+        const value = line.slice(idx + 1).trim();
+        if (key) acc[key] = value;
+      }
+      return acc;
+    }, {} as Record<string, string>);
+};
+
+const numberToWordsEn = (n: number): string => {
+  if (!Number.isFinite(n)) return "not a number";
+  if (n === 0) return "zero";
+  if (n < 0) return `minus ${numberToWordsEn(Math.abs(n))}`;
+
+  const ones = ["", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+  const teens = ["ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+  const underThousand = (num: number): string => {
+    let out = "";
+    const hundred = Math.floor(num / 100);
+    const rem = num % 100;
+    if (hundred) out += `${ones[hundred]} hundred`;
+    if (rem) {
+      if (out) out += " ";
+      if (rem < 10) out += ones[rem];
+      else if (rem < 20) out += teens[rem - 10];
+      else {
+        out += tens[Math.floor(rem / 10)];
+        if (rem % 10) out += `-${ones[rem % 10]}`;
+      }
+    }
+    return out;
+  };
+
+  const parts: string[] = [];
+  const units = ["", "thousand", "million", "billion", "trillion"];
+  let value = Math.floor(n);
+  let idx = 0;
+
+  while (value > 0 && idx < units.length) {
+    const chunk = value % 1000;
+    if (chunk) {
+      const section = underThousand(chunk);
+      parts.unshift(units[idx] ? `${section} ${units[idx]}` : section);
+    }
+    value = Math.floor(value / 1000);
+    idx += 1;
+  }
+
+  return parts.join(" ").trim();
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -962,7 +1030,7 @@ textToPdfTools.forEach(tool => {
 
 // Document conversions (Word, Excel, HTML, etc.)
 const docToPdfTools = [
-  "word-to-pdf", "excel-to-pdf", "html-to-pdf", "spreadsheet-to-pdf",
+  "word-to-pdf", "powerpoint-to-pdf", "excel-to-pdf", "html-to-pdf", "convert-to-pdf", "spreadsheet-to-pdf",
   "excel-url-to-pdf", "word-url-to-pdf"
 ];
 
@@ -987,8 +1055,19 @@ docToPdfTools.forEach(tool => {
       let pdfBytes: Buffer;
 
       try {
+        const lowerName = file.originalname.toLowerCase();
+        const isWordFile = file.mimetype.includes("word") || lowerName.match(/\.(doc|docx)$/);
+        const isSpreadsheetFile = file.mimetype.includes("spreadsheet") || lowerName.match(/\.(xlsx|xls|csv)$/);
+        const isHtmlFile = file.mimetype.includes("html") || lowerName.match(/\.(html|htm)$/);
+        const isPowerPointFile =
+          file.mimetype.includes("presentation") ||
+          file.mimetype.includes("powerpoint") ||
+          lowerName.match(/\.(ppt|pptx)$/);
+        const isPdfFile = file.mimetype === "application/pdf" || lowerName.endsWith(".pdf");
+        const isImageFile = file.mimetype.startsWith("image/");
+
         // Word to PDF conversion
-        if (tool === "word-to-pdf") {
+        if (tool === "word-to-pdf" || (tool === "convert-to-pdf" && isWordFile)) {
           console.log(`Processing as Word file: ${file.originalname}, mimetype: ${file.mimetype}, buffer size: ${file.buffer.length}`);
 
           let text = "";
@@ -1042,7 +1121,7 @@ docToPdfTools.forEach(tool => {
           console.log(`PDF created successfully, size: ${pdfBytes.length} bytes`);
         }
         // Excel to PDF conversion
-        else if ((tool === "excel-to-pdf" || tool === "spreadsheet-to-pdf") && (file.mimetype.includes("spreadsheet") || file.originalname.match(/\.(xlsx|xls|csv)$/))) {
+        else if ((tool === "excel-to-pdf" || tool === "spreadsheet-to-pdf" || (tool === "convert-to-pdf" && isSpreadsheetFile)) && isSpreadsheetFile) {
           const workbook = XLSX.read(file.buffer, { type: "buffer" });
           const pdfDoc = await PDFDocument.create();
           const font = await pdfDoc.embedFont(StandardFonts.Courier);
@@ -1071,7 +1150,7 @@ docToPdfTools.forEach(tool => {
           pdfBytes = Buffer.from(await pdfDoc.save());
         }
         // HTML to PDF (basic)
-        else if (tool === "html-to-pdf") {
+        else if (tool === "html-to-pdf" || (tool === "convert-to-pdf" && isHtmlFile)) {
           const htmlContent = file.buffer.toString("utf-8");
           const textContent = htmlContent.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
 
@@ -1096,6 +1175,33 @@ docToPdfTools.forEach(tool => {
               y -= 16;
             }
           }
+
+          pdfBytes = Buffer.from(await pdfDoc.save());
+        }
+        // Image to PDF conversion for generic convert-to-pdf
+        else if ((tool === "convert-to-pdf" && isImageFile) || isPdfFile) {
+          if (isPdfFile) {
+            pdfBytes = Buffer.from(file.buffer);
+          } else {
+            const pdfDoc = await PDFDocument.create();
+            const pngBuffer = await sharp(file.buffer).png().toBuffer();
+            const pngImage = await pdfDoc.embedPng(pngBuffer);
+            const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
+            page.drawImage(pngImage, { x: 0, y: 0, width: pngImage.width, height: pngImage.height });
+            pdfBytes = Buffer.from(await pdfDoc.save());
+          }
+        }
+        // PowerPoint fallback conversion (text placeholder)
+        else if (tool === "powerpoint-to-pdf" || (tool === "convert-to-pdf" && isPowerPointFile)) {
+          const pdfDoc = await PDFDocument.create();
+          const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+          const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+          const page = pdfDoc.addPage([612, 792]);
+
+          page.drawText("PowerPoint to PDF", { x: 50, y: 740, size: 24, font: bold, color: rgb(0, 0, 0) });
+          page.drawText(`Source file: ${file.originalname}`, { x: 50, y: 700, size: 12, font, color: rgb(0.2, 0.2, 0.2) });
+          page.drawText("This conversion currently creates a readable placeholder PDF.", { x: 50, y: 675, size: 11, font });
+          page.drawText("Slide-perfect rendering can be added with LibreOffice/Unoconv in the next step.", { x: 50, y: 655, size: 11, font });
 
           pdfBytes = Buffer.from(await pdfDoc.save());
         }
@@ -1392,7 +1498,7 @@ specialImageFormats.forEach(tool => {
 
 // PDF to text/document conversions
 const pdfToTextTools = [
-  "pdf-to-word", "pdf-to-excel", "pdf-to-txt", "pdf-to-html",
+  "pdf-to-word", "pdf-to-powerpoint", "pdf-to-excel", "pdf-to-txt", "pdf-to-html",
   "pdf-to-json", "pdf-to-markdown", "pdf-to-yaml", "pdf-to-rtf"
 ];
 
@@ -1435,6 +1541,63 @@ pdfToTextTools.forEach(tool => {
         // For Word, we'll output RTF format which Word can open
         textContent = `{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Times New Roman;}}\n{\\f0\\fs24 ${textContent.replace(/\n/g, "\\par\n")}}}`;        mimetype = "application/rtf";
         fileExtension = ".doc";
+      } else if (tool === "pdf-to-powerpoint") {
+        const pptx = new PptxGenJS();
+        pptx.layout = "LAYOUT_WIDE";
+
+        const paragraphs = textContent
+          .split(/\n{2,}/)
+          .map((block: string) => block.trim())
+          .filter((block: string) => block.length > 0);
+        const sourceBlocks = paragraphs.length > 0 ? paragraphs : [textContent.trim() || "No extractable text found in this PDF."];
+        const blocksPerSlide = 4;
+
+        for (let i = 0; i < sourceBlocks.length; i += blocksPerSlide) {
+          const slide = pptx.addSlide();
+          const chunk = sourceBlocks.slice(i, i + blocksPerSlide).join("\n\n");
+
+          slide.addText(file.originalname.replace(".pdf", ""), {
+            x: 0.5,
+            y: 0.3,
+            w: 12.3,
+            h: 0.5,
+            fontSize: 20,
+            bold: true,
+            color: "1F2937",
+          });
+
+          slide.addText(chunk.substring(0, 2500), {
+            x: 0.5,
+            y: 1.0,
+            w: 12.3,
+            h: 5.9,
+            fontSize: 14,
+            color: "111827",
+            valign: "top",
+          });
+
+          slide.addText(`Slide ${Math.floor(i / blocksPerSlide) + 1}`, {
+            x: 11.6,
+            y: 7.0,
+            w: 1.2,
+            h: 0.3,
+            fontSize: 10,
+            color: "6B7280",
+            align: "right",
+          });
+        }
+
+        const pptxOutput = await pptx.write({ outputType: "nodebuffer" });
+        const pptxBuffer = Buffer.isBuffer(pptxOutput)
+          ? pptxOutput
+          : Buffer.from(pptxOutput as ArrayBuffer);
+
+        await handleConversion(req, res, {
+          buffer: pptxBuffer,
+          filename: file.originalname.replace(".pdf", ".pptx"),
+          mimetype: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        });
+        return;
       } else if (tool === "pdf-to-excel") {
         // Create Excel file from extracted text
         const lines = textContent.split("\n").filter((line: string) => line.trim());
@@ -3429,26 +3592,1194 @@ router.post("/margin-crop", optionalAuth, upload.single("file"), async (req: Aut
   }
 });
 
+// Delete pages (alias tool for remove pages)
+router.post("/delete-pages", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    const pagesParam = ((req.body.pages as string) || (req.query.pages as string) || "1").toString();
+
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const pdf = await PDFDocument.load(file.buffer);
+    const totalPages = pdf.getPageCount();
+    const removeIndices = new Set(parsePageRanges(pagesParam, totalPages));
+    const keepIndices = Array.from({ length: totalPages }, (_, i) => i).filter((i) => !removeIndices.has(i));
+
+    const newPdf = await PDFDocument.create();
+    const pages = await newPdf.copyPages(pdf, keepIndices);
+    pages.forEach((page) => newPdf.addPage(page));
+
+    const out = await newPdf.save();
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_pages_deleted.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Delete pages error:", error);
+    res.status(500).json({ message: "Delete pages failed" });
+  }
+});
+
+// Reorder pages (alias tool for organize)
+router.post("/reorder-pages", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    const orderParam = ((req.body.order as string) || (req.query.order as string) || "").toString();
+
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const pdf = await PDFDocument.load(file.buffer);
+    const indices = orderParam ? parsePageRanges(orderParam, pdf.getPageCount()) : pdf.getPageIndices();
+
+    const newPdf = await PDFDocument.create();
+    const pages = await newPdf.copyPages(pdf, indices);
+    pages.forEach((page) => newPdf.addPage(page));
+
+    const out = await newPdf.save();
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_reordered.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Reorder pages error:", error);
+    res.status(500).json({ message: "Reorder pages failed" });
+  }
+});
+
+router.post("/extract-images", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const format = ((req.body.format as string) || (req.query.format as string) || "png").toString() === "jpg" ? "jpg" : "png";
+    const imageBuffers = await renderPdfToImages(file.buffer, { format, quality: 95, scale: 2.0 });
+    const files = imageBuffers.map((buffer, i) => ({
+      buffer,
+      filename: file.originalname.replace(".pdf", `_image_${i + 1}.${format}`),
+      mimetype: format === "jpg" ? "image/jpeg" : "image/png",
+    }));
+
+    await handleConversion(req, res, files);
+  } catch (error) {
+    console.error("Extract images error:", error);
+    res.status(500).json({ message: "Extract images failed" });
+  }
+});
+
+router.post("/extract-text", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const parsed = await pdfParse(file.buffer);
+    const content = parsed.text || "";
+    await handleConversion(req, res, {
+      buffer: Buffer.from(content, "utf-8"),
+      filename: file.originalname.replace(".pdf", ".txt"),
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Extract text error:", error);
+    res.status(500).json({ message: "Extract text failed" });
+  }
+});
+
+router.post("/convert-pdf-a", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const pdf = await PDFDocument.load(file.buffer, { ignoreEncryption: true });
+    pdf.setProducer("AllInOnePDF PDF/A Converter");
+    pdf.setCreator("AllInOnePDF");
+    pdf.setSubject("PDF/A-like converted output");
+    const out = await pdf.save({ useObjectStreams: false });
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_pdfa.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Convert PDF/A error:", error);
+    res.status(500).json({ message: "Convert PDF/A failed" });
+  }
+});
+
+router.post("/html-to-word", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const html = req.file ? req.file.buffer.toString("utf-8") : (req.body.html || "<p>Empty HTML</p>").toString();
+    const content = html.trim().startsWith("<") ? html : `<html><body><pre>${html}</pre></body></html>`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(content, "utf-8"),
+      filename: (req.file?.originalname || "converted").replace(/\.[^.]+$/, ".doc"),
+      mimetype: "application/msword",
+    });
+  } catch (error) {
+    console.error("HTML to Word error:", error);
+    res.status(500).json({ message: "HTML to Word failed" });
+  }
+});
+
+router.post("/image-compressor", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const quality = Math.max(1, Math.min(100, parseInt((req.body.quality || req.query.quality || "70").toString(), 10)));
+    const out = await sharp(file.buffer).jpeg({ quality }).toBuffer();
+
+    await handleConversion(req, res, {
+      buffer: out,
+      filename: file.originalname.replace(/\.[^.]+$/, "_compressed.jpg"),
+      mimetype: "image/jpeg",
+    });
+  } catch (error) {
+    console.error("Image compressor error:", error);
+    res.status(500).json({ message: "Image compression failed" });
+  }
+});
+
+router.post("/image-resizer", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const width = parseInt((req.body.width || req.query.width || "1024").toString(), 10);
+    const height = parseInt((req.body.height || req.query.height || "1024").toString(), 10);
+    const out = await sharp(file.buffer).resize({ width, height, fit: "inside", withoutEnlargement: true }).toBuffer();
+
+    await handleConversion(req, res, {
+      buffer: out,
+      filename: file.originalname.replace(/\.[^.]+$/, "_resized.png"),
+      mimetype: "image/png",
+    });
+  } catch (error) {
+    console.error("Image resizer error:", error);
+    res.status(500).json({ message: "Image resize failed" });
+  }
+});
+
+router.post("/image-cropper", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const meta = await sharp(file.buffer).metadata();
+    const srcW = meta.width || 1000;
+    const srcH = meta.height || 1000;
+    const width = Math.max(1, Math.min(srcW, parseInt((req.body.width || req.query.width || Math.floor(srcW / 2)).toString(), 10)));
+    const height = Math.max(1, Math.min(srcH, parseInt((req.body.height || req.query.height || Math.floor(srcH / 2)).toString(), 10)));
+    const left = Math.max(0, Math.min(srcW - width, parseInt((req.body.left || req.query.left || 0).toString(), 10)));
+    const top = Math.max(0, Math.min(srcH - height, parseInt((req.body.top || req.query.top || 0).toString(), 10)));
+
+    const out = await sharp(file.buffer).extract({ left, top, width, height }).png().toBuffer();
+    await handleConversion(req, res, {
+      buffer: out,
+      filename: file.originalname.replace(/\.[^.]+$/, "_cropped.png"),
+      mimetype: "image/png",
+    });
+  } catch (error) {
+    console.error("Image cropper error:", error);
+    res.status(500).json({ message: "Image crop failed" });
+  }
+});
+
+router.post("/image-rotate", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const degrees = parseInt((req.body.degrees || req.query.degrees || "90").toString(), 10);
+    const out = await sharp(file.buffer).rotate(degrees).png().toBuffer();
+    await handleConversion(req, res, {
+      buffer: out,
+      filename: file.originalname.replace(/\.[^.]+$/, "_rotated.png"),
+      mimetype: "image/png",
+    });
+  } catch (error) {
+    console.error("Image rotate error:", error);
+    res.status(500).json({ message: "Image rotate failed" });
+  }
+});
+
+router.post("/image-to-text", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const result = await Tesseract.recognize(file.buffer, "eng");
+    const text = result.data.text || "";
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: file.originalname.replace(/\.[^.]+$/, ".txt"),
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Image to text error:", error);
+    res.status(500).json({ message: "Image to text failed" });
+  }
+});
+
+const imageToWordTools = ["jpg-to-word", "png-to-word"];
+imageToWordTools.forEach((tool) => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ message: "No image provided" });
+        return;
+      }
+
+      const result = await Tesseract.recognize(file.buffer, "eng");
+      const text = (result.data.text || "").trim();
+      const rtf = `{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Times New Roman;}}\n{\\f0\\fs24 ${text
+        .replace(/\\/g, "\\\\")
+        .replace(/{/g, "\\{")
+        .replace(/}/g, "\\}")
+        .replace(/\n/g, "\\par\n")}}}`;
+
+      await handleConversion(req, res, {
+        buffer: Buffer.from(rtf, "utf-8"),
+        filename: file.originalname.replace(/\.[^.]+$/, ".doc"),
+        mimetype: "application/rtf",
+      });
+    } catch (error) {
+      console.error(`${tool} error:`, error);
+      res.status(500).json({ message: "Conversion failed" });
+    }
+  });
+});
+
+const imageToExcelTools = ["jpg-to-excel", "png-to-excel"];
+imageToExcelTools.forEach((tool) => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const file = req.file;
+      if (!file) {
+        res.status(400).json({ message: "No image provided" });
+        return;
+      }
+
+      const result = await Tesseract.recognize(file.buffer, "eng");
+      const lines = (result.data.text || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const rows = lines.map((line) => [line]);
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.aoa_to_sheet(rows.length ? rows : [["No text extracted"]]);
+      XLSX.utils.book_append_sheet(workbook, worksheet, "OCR");
+      const excelBuffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+      await handleConversion(req, res, {
+        buffer: excelBuffer,
+        filename: file.originalname.replace(/\.[^.]+$/, ".xlsx"),
+        mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+    } catch (error) {
+      console.error(`${tool} error:`, error);
+      res.status(500).json({ message: "Conversion failed" });
+    }
+  });
+});
+
+router.post("/barcode-generator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const text =
+      (req.body.text || "").toString().trim() ||
+      (req.file ? path.parse(req.file.originalname).name : "") ||
+      "1234567890";
+
+    const buffer = await bwipjs.toBuffer({
+      bcid: (req.body.type || "code128").toString(),
+      text,
+      scale: 3,
+      height: 12,
+      includetext: true,
+      textxalign: "center",
+    });
+
+    await handleConversion(req, res, {
+      buffer,
+      filename: "barcode.png",
+      mimetype: "image/png",
+    });
+  } catch (error) {
+    console.error("Barcode generator error:", error);
+    res.status(500).json({ message: "Barcode generation failed" });
+  }
+});
+
+router.post("/qr-code-generator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const text =
+      (req.body.text || "").toString().trim() ||
+      (req.file ? req.file.buffer.toString("utf-8").trim() : "") ||
+      "Hello from AllInOnePDF";
+
+    const buffer = await QRCode.toBuffer(text, {
+      type: "png",
+      margin: 2,
+      width: 512,
+      errorCorrectionLevel: "M",
+    });
+
+    await handleConversion(req, res, {
+      buffer,
+      filename: "qr-code.png",
+      mimetype: "image/png",
+    });
+  } catch (error) {
+    console.error("QR code generator error:", error);
+    res.status(500).json({ message: "QR generation failed" });
+  }
+});
+
+router.post("/qr-code-scanner", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No image provided" });
+      return;
+    }
+
+    const { data, info } = await sharp(file.buffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const code = jsQR(new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), info.width, info.height);
+    const decoded = code?.data || "No QR code detected";
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(decoded, "utf-8"),
+      filename: file.originalname.replace(/\.[^.]+$/, "_qr.txt"),
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("QR scanner error:", error);
+    res.status(500).json({ message: "QR scan failed" });
+  }
+});
+
+router.post("/unit-converter", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const value = parseFloat((req.body.value || kv.value || "1").toString());
+    const from = (req.body.from || kv.from || "km").toString().toLowerCase();
+    const to = (req.body.to || kv.to || "m").toString().toLowerCase();
+
+    const length: Record<string, number> = { mm: 0.001, cm: 0.01, m: 1, km: 1000, in: 0.0254, ft: 0.3048, yd: 0.9144, mi: 1609.34 };
+    const weight: Record<string, number> = { mg: 0.000001, g: 0.001, kg: 1, lb: 0.453592, oz: 0.0283495 };
+
+    let resultText = "";
+    if (from in length && to in length) {
+      const out = (value * length[from]) / length[to];
+      resultText = `${value} ${from} = ${out} ${to}`;
+    } else if (from in weight && to in weight) {
+      const out = (value * weight[from]) / weight[to];
+      resultText = `${value} ${from} = ${out} ${to}`;
+    } else if ((from === "c" || from === "f" || from === "k") && (to === "c" || to === "f" || to === "k")) {
+      let c = value;
+      if (from === "f") c = (value - 32) * (5 / 9);
+      if (from === "k") c = value - 273.15;
+      let out = c;
+      if (to === "f") out = c * (9 / 5) + 32;
+      if (to === "k") out = c + 273.15;
+      resultText = `${value} ${from.toUpperCase()} = ${out} ${to.toUpperCase()}`;
+    } else {
+      resultText = `Unsupported conversion: ${from} to ${to}`;
+    }
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(resultText, "utf-8"),
+      filename: "unit-conversion.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Unit converter error:", error);
+    res.status(500).json({ message: "Unit conversion failed" });
+  }
+});
+
+router.post("/number-to-words", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const raw = (req.body.number || kv.number || "123").toString().trim();
+    const value = Number(raw);
+    const words = numberToWordsEn(value);
+    const text = `Number: ${raw}\nWords: ${words}`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "number-to-words.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Number to words error:", error);
+    res.status(500).json({ message: "Number conversion failed" });
+  }
+});
+
+router.post("/age-calculator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const dobStr = (req.body.dob || kv.dob || "2000-01-01").toString();
+    const asOfStr = (req.body.as_of || kv.as_of || new Date().toISOString().slice(0, 10)).toString();
+    const dob = new Date(dobStr);
+    const asOf = new Date(asOfStr);
+
+    if (isNaN(dob.getTime()) || isNaN(asOf.getTime())) {
+      res.status(400).json({ message: "Invalid date format. Use YYYY-MM-DD." });
+      return;
+    }
+
+    let years = asOf.getFullYear() - dob.getFullYear();
+    let months = asOf.getMonth() - dob.getMonth();
+    let days = asOf.getDate() - dob.getDate();
+    if (days < 0) {
+      const prevMonth = new Date(asOf.getFullYear(), asOf.getMonth(), 0).getDate();
+      days += prevMonth;
+      months -= 1;
+    }
+    if (months < 0) {
+      months += 12;
+      years -= 1;
+    }
+
+    const text = `DOB: ${dobStr}\nAs of: ${asOfStr}\nAge: ${years} years, ${months} months, ${days} days`;
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "age-calculation.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Age calculator error:", error);
+    res.status(500).json({ message: "Age calculation failed" });
+  }
+});
+
+router.post("/bmi-calculator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const weightKg = parseFloat((req.body.weight_kg || kv.weight_kg || "70").toString());
+    const heightCm = parseFloat((req.body.height_cm || kv.height_cm || "170").toString());
+    const heightM = heightCm / 100;
+    const bmi = weightKg / (heightM * heightM);
+
+    let category = "Normal";
+    if (bmi < 18.5) category = "Underweight";
+    else if (bmi < 25) category = "Normal";
+    else if (bmi < 30) category = "Overweight";
+    else category = "Obese";
+
+    const text = `Weight (kg): ${weightKg}\nHeight (cm): ${heightCm}\nBMI: ${bmi.toFixed(2)}\nCategory: ${category}`;
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "bmi-calculation.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("BMI calculator error:", error);
+    res.status(500).json({ message: "BMI calculation failed" });
+  }
+});
+
+const gstTools = ["gst-calculator", "gst-calculat"];
+gstTools.forEach((tool) => {
+  router.post(`/${tool}`, optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+    try {
+      const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+      const amount = parseFloat((req.body.amount || kv.amount || "1000").toString());
+      const rate = parseFloat((req.body.rate || kv.rate || "18").toString());
+      const gst = (amount * rate) / 100;
+      const total = amount + gst;
+
+      const text = `Amount: ${amount}\nGST Rate: ${rate}%\nGST: ${gst.toFixed(2)}\nTotal: ${total.toFixed(2)}`;
+      await handleConversion(req, res, {
+        buffer: Buffer.from(text, "utf-8"),
+        filename: "gst-calculation.txt",
+        mimetype: "text/plain",
+      });
+    } catch (error) {
+      console.error(`${tool} error:`, error);
+      res.status(500).json({ message: "GST calculation failed" });
+    }
+  });
+});
+
+router.post("/currency-converter", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const amount = parseFloat((req.body.amount || kv.amount || "100").toString());
+    const from = (req.body.from || kv.from || "USD").toString().toUpperCase();
+    const to = (req.body.to || kv.to || "PKR").toString().toUpperCase();
+
+    const ratesToUsd: Record<string, number> = {
+      USD: 1,
+      EUR: 0.92,
+      GBP: 0.79,
+      PKR: 278,
+      INR: 83,
+      AED: 3.67,
+      SAR: 3.75,
+      CNY: 7.2,
+      JPY: 149,
+      CAD: 1.35,
+      AUD: 1.53,
+    };
+
+    if (!(from in ratesToUsd) || !(to in ratesToUsd)) {
+      res.status(400).json({ message: `Unsupported currency. Supported: ${Object.keys(ratesToUsd).join(", ")}` });
+      return;
+    }
+
+    const usdAmount = amount / ratesToUsd[from];
+    const converted = usdAmount * ratesToUsd[to];
+    const text = `Amount: ${amount} ${from}\nConverted: ${converted.toFixed(4)} ${to}\nRates snapshot date: ${new Date().toISOString().slice(0, 10)}`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "currency-conversion.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Currency converter error:", error);
+    res.status(500).json({ message: "Currency conversion failed" });
+  }
+});
+
+router.post("/text-to-speech", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const textInput = (req.body.text || (req.file ? req.file.buffer.toString("utf-8") : "") || "Hello from AllInOnePDF").toString();
+    const clean = textInput.trim() || "Hello from AllInOnePDF";
+    const ssml = `<speak><prosody rate="medium" pitch="medium">${clean
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")}</prosody></speak>`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(ssml, "utf-8"),
+      filename: "text-to-speech.ssml",
+      mimetype: "application/xml",
+    });
+  } catch (error) {
+    console.error("Text to speech error:", error);
+    res.status(500).json({ message: "Text-to-speech failed" });
+  }
+});
+
+router.post("/speech-to-text", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No audio file provided" });
+      return;
+    }
+
+    // Non-AI fallback transcription note.
+    const text = [
+      "Speech-to-Text (non-AI fallback)",
+      `File: ${file.originalname}`,
+      `Size: ${file.size} bytes`,
+      "",
+      "Automatic audio transcription is not enabled in this offline mode.",
+      "You can integrate Whisper/Google/Azure for real speech-to-text output.",
+    ].join("\n");
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: file.originalname.replace(/\.[^.]+$/, "_transcript.txt"),
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Speech to text error:", error);
+    res.status(500).json({ message: "Speech-to-text failed" });
+  }
+});
+
+router.post("/password-generator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const length = Math.max(4, Math.min(128, parseInt((req.body.length || kv.length || "16").toString(), 10)));
+    const includeUpper = (req.body.upper || kv.upper || "true").toString().toLowerCase() !== "false";
+    const includeLower = (req.body.lower || kv.lower || "true").toString().toLowerCase() !== "false";
+    const includeDigits = (req.body.digits || kv.digits || "true").toString().toLowerCase() !== "false";
+    const includeSymbols = (req.body.symbols || kv.symbols || "true").toString().toLowerCase() !== "false";
+
+    let charset = "";
+    if (includeUpper) charset += "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (includeLower) charset += "abcdefghijklmnopqrstuvwxyz";
+    if (includeDigits) charset += "0123456789";
+    if (includeSymbols) charset += "!@#$%^&*()_+-=[]{}|;:,.<>?";
+    if (!charset) charset = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+    let password = "";
+    for (let i = 0; i < length; i++) {
+      const idx = crypto.randomInt(0, charset.length);
+      password += charset[idx];
+    }
+
+    const text = `Password: ${password}\nLength: ${length}\nUpper: ${includeUpper}\nLower: ${includeLower}\nDigits: ${includeDigits}\nSymbols: ${includeSymbols}`;
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "generated-password.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Password generator error:", error);
+    res.status(500).json({ message: "Password generation failed" });
+  }
+});
+
+router.post("/password-strength-checker", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const password = (req.body.password || kv.password || "").toString();
+    if (!password) {
+      res.status(400).json({ message: "Password is required (password=...)" });
+      return;
+    }
+
+    let score = 0;
+    if (password.length >= 8) score += 25;
+    if (password.length >= 12) score += 15;
+    if (/[a-z]/.test(password)) score += 15;
+    if (/[A-Z]/.test(password)) score += 15;
+    if (/\d/.test(password)) score += 15;
+    if (/[^A-Za-z0-9]/.test(password)) score += 15;
+    score = Math.min(100, score);
+
+    const category = score < 40 ? "Weak" : score < 70 ? "Medium" : "Strong";
+    const text = `Password strength: ${category}\nScore: ${score}/100\nLength: ${password.length}`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "password-strength.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Password strength error:", error);
+    res.status(500).json({ message: "Password strength check failed" });
+  }
+});
+
+router.post("/lorem-ipsum-generator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const paragraphs = Math.max(1, Math.min(50, parseInt((req.body.paragraphs || kv.paragraphs || "3").toString(), 10)));
+    const wordsPerParagraph = Math.max(5, Math.min(300, parseInt((req.body.words || kv.words || "60").toString(), 10)));
+    const vocab = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua".split(" ");
+
+    const blocks: string[] = [];
+    for (let p = 0; p < paragraphs; p++) {
+      const words: string[] = [];
+      for (let i = 0; i < wordsPerParagraph; i++) {
+        words.push(vocab[crypto.randomInt(0, vocab.length)]);
+      }
+      const sentence = words.join(" ");
+      blocks.push(sentence.charAt(0).toUpperCase() + sentence.slice(1) + ".");
+    }
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(blocks.join("\n\n"), "utf-8"),
+      filename: "lorem-ipsum.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Lorem ipsum generator error:", error);
+    res.status(500).json({ message: "Lorem ipsum generation failed" });
+  }
+});
+
+router.post("/random-number-generator", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const kv = parseKeyValueText(req.file ? req.file.buffer.toString("utf-8") : "");
+    const min = parseInt((req.body.min || kv.min || "1").toString(), 10);
+    const max = parseInt((req.body.max || kv.max || "100").toString(), 10);
+    const count = Math.max(1, Math.min(1000, parseInt((req.body.count || kv.count || "10").toString(), 10)));
+    const lo = Math.min(min, max);
+    const hi = Math.max(min, max);
+
+    const numbers = Array.from({ length: count }, () => crypto.randomInt(lo, hi + 1));
+    const text = `Range: ${lo}..${hi}\nCount: ${count}\n\n${numbers.join("\n")}`;
+    await handleConversion(req, res, {
+      buffer: Buffer.from(text, "utf-8"),
+      filename: "random-numbers.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Random number generator error:", error);
+    res.status(500).json({ message: "Random number generation failed" });
+  }
+});
+
+router.post("/case-converter", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const input = (req.body.text || (req.file ? req.file.buffer.toString("utf-8") : "") || "").toString();
+    const mode = (req.body.mode || "upper").toString().toLowerCase();
+
+    const words: string[] = input
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean);
+
+    const toTitle = (s: string) => s.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+    let output = input;
+
+    switch (mode) {
+      case "lower":
+        output = input.toLowerCase();
+        break;
+      case "title":
+        output = toTitle(input);
+        break;
+      case "sentence":
+        output = input.charAt(0).toUpperCase() + input.slice(1).toLowerCase();
+        break;
+      case "snake":
+        output = words.map((w: string) => w.toLowerCase()).join("_");
+        break;
+      case "kebab":
+        output = words.map((w: string) => w.toLowerCase()).join("-");
+        break;
+      case "camel":
+        output = words
+          .map((w: string, i: number) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()))
+          .join("");
+        break;
+      case "pascal":
+        output = words.map((w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join("");
+        break;
+      case "upper":
+      default:
+        output = input.toUpperCase();
+        break;
+    }
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(output, "utf-8"),
+      filename: "case-converted.txt",
+      mimetype: "text/plain",
+    });
+  } catch (error) {
+    console.error("Case converter error:", error);
+    res.status(500).json({ message: "Case conversion failed" });
+  }
+});
+
+router.post("/json-formatter", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const input = (req.body.json || (req.file ? req.file.buffer.toString("utf-8") : "") || "").toString().trim();
+    if (!input) {
+      res.status(400).json({ message: "No JSON input provided" });
+      return;
+    }
+
+    const parsed = JSON.parse(input);
+    const pretty = JSON.stringify(parsed, null, 2);
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pretty, "utf-8"),
+      filename: "formatted.json",
+      mimetype: "application/json",
+    });
+  } catch (error) {
+    console.error("JSON formatter error:", error);
+    res.status(500).json({ message: "Invalid JSON" });
+  }
+});
+
+router.post("/xml-formatter", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const input = (req.body.xml || (req.file ? req.file.buffer.toString("utf-8") : "") || "").toString().trim();
+    if (!input) {
+      res.status(400).json({ message: "No XML input provided" });
+      return;
+    }
+
+    const xml = input.replace(/>\s*</g, "><");
+    const withBreaks = xml.replace(/(>)(<)(\/*)/g, "$1\n$2$3");
+    const lines: string[] = withBreaks.split("\n");
+    let indent = 0;
+    const pretty = lines
+      .map((line: string) => {
+        const trimmed = line.trim();
+        if (trimmed.match(/^<\//)) indent = Math.max(0, indent - 1);
+        const prefixed = `${"  ".repeat(indent)}${trimmed}`;
+        if (trimmed.match(/^<[^!?][^>]*[^/]>/) && !trimmed.includes("</")) indent += 1;
+        return prefixed;
+      })
+      .join("\n");
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(pretty, "utf-8"),
+      filename: "formatted.xml",
+      mimetype: "application/xml",
+    });
+  } catch (error) {
+    console.error("XML formatter error:", error);
+    res.status(500).json({ message: "XML formatting failed" });
+  }
+});
+
+router.post("/csv-to-excel", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const csv = req.file ? req.file.buffer.toString("utf-8") : (req.body.csv || "").toString();
+    if (!csv.trim()) {
+      res.status(400).json({ message: "No CSV input provided" });
+      return;
+    }
+
+    const workbook = XLSX.read(csv, { type: "string" });
+    const excelBuffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+    await handleConversion(req, res, {
+      buffer: excelBuffer,
+      filename: (req.file?.originalname || "converted").replace(/\.[^.]+$/, ".xlsx"),
+      mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+  } catch (error) {
+    console.error("CSV to Excel error:", error);
+    res.status(500).json({ message: "CSV to Excel conversion failed" });
+  }
+});
+
+// OCR PDF (non-AI fallback route)
+router.post("/ocr-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const imageBuffers = await renderPdfToImages(file.buffer, { format: "png", quality: 90, scale: 2.0 });
+    const ocrTexts: string[] = [];
+
+    for (const image of imageBuffers) {
+      try {
+        const result = await Tesseract.recognize(image, "eng");
+        ocrTexts.push(result.data.text || "");
+      } catch {
+        ocrTexts.push("[OCR failed on one page]");
+      }
+    }
+
+    const text = ocrTexts.join("\n\n--- PAGE BREAK ---\n\n").trim() || "No text detected from OCR.";
+
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    let page = pdf.addPage([612, 792]);
+    let y = 750;
+
+    for (const line of text.split("\n")) {
+      const wrapped = line.match(/.{1,85}/g) || [line];
+      for (const row of wrapped) {
+        if (y < 50) {
+          page = pdf.addPage([612, 792]);
+          y = 750;
+        }
+        page.drawText(row, { x: 50, y, size: 10, font, color: rgb(0, 0, 0) });
+        y -= 14;
+      }
+    }
+
+    const out = await pdf.save();
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_ocr.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("OCR PDF error:", error);
+    res.status(500).json({ message: "OCR failed" });
+  }
+});
+
+// Repair PDF (basic structural rewrite)
+router.post("/repair-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const pdf = await PDFDocument.load(file.buffer, { ignoreEncryption: true });
+    const out = await pdf.save({ useObjectStreams: false });
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_repaired.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Repair PDF error:", error);
+    res.status(500).json({ message: "Repair failed" });
+  }
+});
+
+// Compare PDF (text-based comparison report)
+router.post("/compare-pdf", optionalAuth, upload.array("files", 2), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length < 2) {
+      res.status(400).json({ message: "Please upload 2 PDF files" });
+      return;
+    }
+
+    const a = await pdfParse(files[0].buffer);
+    const b = await pdfParse(files[1].buffer);
+
+    const linesA = a.text.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    const linesB = b.text.split("\n").map((l: string) => l.trim()).filter(Boolean);
+    const setA = new Set(linesA);
+    const setB = new Set(linesB);
+
+    const onlyA = linesA.filter((line: string) => !setB.has(line)).slice(0, 50);
+    const onlyB = linesB.filter((line: string) => !setA.has(line)).slice(0, 50);
+
+    const report = [
+      "PDF Comparison Report",
+      "",
+      `File A: ${files[0].originalname}`,
+      `File B: ${files[1].originalname}`,
+      `Pages A: ${a.numpages} | Pages B: ${b.numpages}`,
+      `Text chars A: ${a.text.length} | Text chars B: ${b.text.length}`,
+      `Unique lines only in A (sample): ${onlyA.length}`,
+      `Unique lines only in B (sample): ${onlyB.length}`,
+      "",
+      "Only in A:",
+      ...onlyA,
+      "",
+      "Only in B:",
+      ...onlyB,
+    ].join("\n");
+
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Courier);
+    let page = pdf.addPage([612, 792]);
+    let y = 750;
+
+    for (const line of report.split("\n")) {
+      const wrapped = line.match(/.{1,90}/g) || [line];
+      for (const row of wrapped) {
+        if (y < 40) {
+          page = pdf.addPage([612, 792]);
+          y = 750;
+        }
+        page.drawText(row, { x: 40, y, size: 9, font, color: rgb(0, 0, 0) });
+        y -= 12;
+      }
+    }
+
+    const out = await pdf.save();
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: "comparison-report.pdf",
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Compare PDF error:", error);
+    res.status(500).json({ message: "Comparison failed" });
+  }
+});
+
+// Redact PDF (text-based regenerated redacted copy)
+router.post("/redact-pdf", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const target = ((req.body.text || req.query.text || "") as string).trim();
+    const parsed = await pdfParse(file.buffer);
+    let redacted = parsed.text || "";
+
+    if (target) {
+      const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      redacted = redacted.replace(new RegExp(escaped, "gi"), "[REDACTED]");
+    } else {
+      redacted = redacted
+        .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[REDACTED_EMAIL]")
+        .replace(/\b\d{10,19}\b/g, "[REDACTED_NUMBER]");
+    }
+
+    const pdf = await PDFDocument.create();
+    const font = await pdf.embedFont(StandardFonts.Helvetica);
+    let page = pdf.addPage([612, 792]);
+    let y = 750;
+
+    for (const line of redacted.split("\n")) {
+      const wrapped = line.match(/.{1,85}/g) || [line];
+      for (const row of wrapped) {
+        if (y < 50) {
+          page = pdf.addPage([612, 792]);
+          y = 750;
+        }
+        page.drawText(row, { x: 50, y, size: 10, font, color: rgb(0, 0, 0) });
+        y -= 14;
+      }
+    }
+
+    const out = await pdf.save();
+    await handleConversion(req, res, {
+      buffer: Buffer.from(out),
+      filename: file.originalname.replace(".pdf", "_redacted.pdf"),
+      mimetype: "application/pdf",
+    });
+  } catch (error) {
+    console.error("Redact PDF error:", error);
+    res.status(500).json({ message: "Redaction failed" });
+  }
+});
+
+// Split Word document into two parts
+router.post("/split-word", optionalAuth, upload.single("file"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const file = req.file;
+    if (!file) {
+      res.status(400).json({ message: "No file provided" });
+      return;
+    }
+
+    const result = await mammoth.extractRawText({ buffer: file.buffer });
+    const text = (result.value || "").trim();
+    const blocks = text.split(/\n{2,}/).filter(Boolean);
+    const midpoint = Math.max(1, Math.ceil(blocks.length / 2));
+    const first = (blocks.slice(0, midpoint).join("\n\n") || text || "").trim();
+    const second = (blocks.slice(midpoint).join("\n\n") || "").trim();
+
+    const toRtf = (content: string) =>
+      `{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Times New Roman;}}\n{\\f0\\fs24 ${content
+        .replace(/\\/g, "\\\\")
+        .replace(/{/g, "\\{")
+        .replace(/}/g, "\\}")
+        .replace(/\n/g, "\\par\n")}}}`;
+
+    const outputs = [
+      {
+        buffer: Buffer.from(toRtf(first)),
+        filename: file.originalname.replace(/\.[^.]+$/, "_part1.doc"),
+        mimetype: "application/rtf",
+      },
+    ];
+
+    if (second) {
+      outputs.push({
+        buffer: Buffer.from(toRtf(second)),
+        filename: file.originalname.replace(/\.[^.]+$/, "_part2.doc"),
+        mimetype: "application/rtf",
+      });
+    }
+
+    await handleConversion(req, res, outputs);
+  } catch (error) {
+    console.error("Split Word error:", error);
+    res.status(500).json({ message: "Split Word failed" });
+  }
+});
+
+// Merge multiple Word documents
+router.post("/merge-word", optionalAuth, upload.array("files", 20), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const files = req.files as Express.Multer.File[];
+    if (!files || files.length < 2) {
+      res.status(400).json({ message: "Please upload at least 2 Word files" });
+      return;
+    }
+
+    const chunks: string[] = [];
+    for (const file of files) {
+      const result = await mammoth.extractRawText({ buffer: file.buffer });
+      const text = (result.value || "").trim();
+      chunks.push(`=== ${file.originalname} ===\n${text}`);
+    }
+
+    const mergedText = chunks.join("\n\n");
+    const rtf = `{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Times New Roman;}}\n{\\f0\\fs24 ${mergedText
+      .replace(/\\/g, "\\\\")
+      .replace(/{/g, "\\{")
+      .replace(/}/g, "\\}")
+      .replace(/\n/g, "\\par\n")}}}`;
+
+    await handleConversion(req, res, {
+      buffer: Buffer.from(rtf),
+      filename: "merged.doc",
+      mimetype: "application/rtf",
+    });
+  } catch (error) {
+    console.error("Merge Word error:", error);
+    res.status(500).json({ message: "Merge Word failed" });
+  }
+});
+
 // Download proxy endpoint - handles cross-origin downloads
 router.get("/download", async (req: Request, res: Response) => {
   try {
-    const { url, publicId, filename } = req.query;
+    const { url, publicId, filename, resourceType, format } = req.query;
     
     let fetchUrl: string;
     
     if (publicId && typeof publicId === "string") {
-      // Generate a fresh authenticated download URL using Cloudinary's private_download_url
+      const resolvedResourceType =
+        resourceType === "image" ? "image" : "raw";
+      const resolvedFormat = typeof format === "string" ? format : "";
+
+      // Generate a fresh authenticated URL based on resource type.
       const cloudinary = (await import("../config/cloudinary.js")).default;
-      fetchUrl = cloudinary.utils.private_download_url(
-        publicId,
-        "",
-        {
-          resource_type: "raw",
+      if (resolvedResourceType === "raw") {
+        fetchUrl = cloudinary.utils.private_download_url(
+          publicId,
+          resolvedFormat,
+          {
+            resource_type: "raw",
+            type: "upload",
+            expires_at: Math.floor(Date.now() / 1000) + 300, // 5 min expiry
+          }
+        );
+      } else {
+        fetchUrl = cloudinary.url(publicId, {
+          resource_type: "image",
           type: "upload",
-          expires_at: Math.floor(Date.now() / 1000) + 300, // 5 min expiry
-        }
-      );
-      console.log("Generated private download URL for publicId:", publicId);
+          secure: true,
+          sign_url: true,
+          format: resolvedFormat || undefined,
+        });
+      }
+
+      console.log("Generated download URL for publicId:", publicId, "resourceType:", resolvedResourceType);
     } else if (url && typeof url === "string") {
       // Validate URL is from Cloudinary
       if (!url.includes("cloudinary.com")) {

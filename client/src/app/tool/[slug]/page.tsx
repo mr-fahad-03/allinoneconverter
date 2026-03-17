@@ -29,6 +29,144 @@ export default function ToolPage({ params }: Props) {
 
   // Determine accepted file types based on tool
   const getAcceptedTypes = () => {
+    const pdfInputTools = new Set([
+      "delete-pages",
+      "reorder-pages",
+      "extract-images",
+      "extract-text",
+      "convert-pdf-a",
+      "pdf-to-html",
+    ]);
+    if (pdfInputTools.has(tool.slug)) {
+      return { "application/pdf": [".pdf"] };
+    }
+
+    const htmlInputTools = new Set(["html-to-word"]);
+    if (htmlInputTools.has(tool.slug)) {
+      return { "text/html": [".html", ".htm"] };
+    }
+
+    const csvInputTools = new Set(["csv-to-excel"]);
+    if (csvInputTools.has(tool.slug)) {
+      return { "text/csv": [".csv"] };
+    }
+
+    const jsonInputTools = new Set(["json-formatter"]);
+    if (jsonInputTools.has(tool.slug)) {
+      return { "application/json": [".json"] };
+    }
+
+    const xmlInputTools = new Set(["xml-formatter"]);
+    if (xmlInputTools.has(tool.slug)) {
+      return { "application/xml": [".xml"], "text/xml": [".xml"] };
+    }
+
+    const audioInputTools = new Set(["speech-to-text"]);
+    if (audioInputTools.has(tool.slug)) {
+      return {
+        "audio/mpeg": [".mp3"],
+        "audio/wav": [".wav"],
+        "audio/x-wav": [".wav"],
+        "audio/ogg": [".ogg"],
+        "audio/webm": [".webm"],
+        "audio/mp4": [".m4a"],
+      };
+    }
+
+    const imageInputTools = new Set([
+      "image-compressor",
+      "image-resizer",
+      "image-cropper",
+      "image-rotate",
+      "image-to-text",
+      "jpg-to-word",
+      "png-to-word",
+      "jpg-to-excel",
+      "png-to-excel",
+      "qr-code-scanner",
+    ]);
+    if (imageInputTools.has(tool.slug)) {
+      return {
+        "image/jpeg": [".jpg", ".jpeg"],
+        "image/png": [".png"],
+        "image/webp": [".webp"],
+        "image/bmp": [".bmp"],
+        "image/gif": [".gif"],
+      };
+    }
+
+    const textInputTools = new Set([
+      "barcode-generator",
+      "qr-code-generator",
+      "unit-converter",
+      "currency-converter",
+      "text-to-speech",
+      "password-generator",
+      "password-strength-checker",
+      "lorem-ipsum-generator",
+      "random-number-generator",
+      "case-converter",
+      "number-to-words",
+      "age-calculator",
+      "bmi-calculator",
+      "gst-calculator",
+    ]);
+    if (textInputTools.has(tool.slug)) {
+      return { "text/plain": [".txt"] };
+    }
+
+    if (tool.slug === "merge-pdf-image") {
+      return {
+        "application/pdf": [".pdf"],
+        "image/jpeg": [".jpg", ".jpeg"],
+        "image/png": [".png"],
+        "image/webp": [".webp"],
+        "image/bmp": [".bmp"],
+        "image/gif": [".gif"],
+      };
+    }
+
+    if (tool.slug === "compare-pdf") {
+      return { "application/pdf": [".pdf"] };
+    }
+
+    if (tool.slug === "word-to-jpg" || tool.slug === "word-to-png" || tool.slug === "split-word" || tool.slug === "merge-word" || tool.slug === "word-converter") {
+      return {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+        "application/msword": [".doc"],
+      };
+    }
+
+    if (tool.slug === "excel-converter") {
+      return {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+        "application/vnd.ms-excel": [".xls"],
+        "text/csv": [".csv"],
+      };
+    }
+
+    if (tool.slug === "powerpoint-to-pdf") {
+      return {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+        "application/vnd.ms-powerpoint": [".ppt"],
+      };
+    }
+
+    if (tool.slug === "convert-to-pdf") {
+      return {
+        "application/pdf": [".pdf"],
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+        "application/msword": [".doc"],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+        "application/vnd.ms-excel": [".xls"],
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+        "application/vnd.ms-powerpoint": [".ppt"],
+        "text/html": [".html", ".htm"],
+        "text/plain": [".txt"],
+        "image/*": [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"],
+      };
+    }
+
     // Image to PDF conversions
     if (tool.category === "convert-to-pdf") {
       const ext = tool.slug.split("-to-pdf")[0];
@@ -48,11 +186,15 @@ export default function ToolPage({ params }: Props) {
         markdown: { "text/markdown": [".md", ".markdown"] },
         word: {
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            [".docx"],
+            [".docx", ".doc"],
         },
         excel: {
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-            [".xlsx"],
+            [".xlsx", ".xls"],
+        },
+        powerpoint: {
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            [".pptx", ".ppt"],
         },
       };
       return mimeMap[ext] || { "image/*": [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"] };
@@ -69,15 +211,30 @@ export default function ToolPage({ params }: Props) {
 
   // Determine max files based on tool
   const getMaxFiles = () => {
-    // Merge needs multiple files
-    if (tool.slug === "merge-pdf" || tool.slug === "merge-pdf-image") {
+    if (tool.slug === "merge-pdf" || tool.slug === "merge-pdf-image" || tool.slug === "merge-word") {
       return 20;
     }
-    // Image to PDF can take multiple images
-    if (tool.category === "convert-to-pdf") {
+
+    if (tool.slug === "compare-pdf") {
+      return 2;
+    }
+
+    const multiImageToPdfTools = new Set([
+      "jpg-to-pdf",
+      "png-to-pdf",
+      "bmp-to-pdf",
+      "gif-to-pdf",
+      "webp-to-pdf",
+      "svg-to-pdf",
+      "avif-to-pdf",
+      "psd-to-pdf",
+      "ico-to-pdf",
+      "tga-to-pdf",
+    ]);
+    if (multiImageToPdfTools.has(tool.slug)) {
       return 20;
     }
-    // Most tools work with single file
+
     return 1;
   };
 

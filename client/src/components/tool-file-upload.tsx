@@ -14,7 +14,26 @@ interface ConvertedFile {
   url: string;
   size: number;
   publicId?: string;
+  resourceType?: "raw" | "image";
+  format?: string;
 }
+
+const MULTI_FILE_TOOLS = new Set([
+  "merge-pdf",
+  "merge-pdf-image",
+  "merge-word",
+  "compare-pdf",
+  "jpg-to-pdf",
+  "png-to-pdf",
+  "bmp-to-pdf",
+  "gif-to-pdf",
+  "webp-to-pdf",
+  "svg-to-pdf",
+  "avif-to-pdf",
+  "psd-to-pdf",
+  "ico-to-pdf",
+  "tga-to-pdf",
+]);
 
 interface ToolFileUploadProps {
   toolSlug: string;
@@ -50,9 +69,9 @@ export function ToolFileUpload({
 
     try {
       const formData = new FormData();
+      const usesFilesField = MULTI_FILE_TOOLS.has(toolSlug);
       
-      // For merge, we need multiple files
-      if (toolSlug === "merge-pdf") {
+      if (usesFilesField) {
         files.forEach((file) => formData.append("files", file));
       } else if (files.length === 1) {
         formData.append("file", files[0]);
@@ -124,16 +143,22 @@ export function ToolFileUpload({
         // Use server proxy with publicId for server-side authenticated URL generation
         const params = new URLSearchParams();
         if (file.publicId) {
-          params.set('publicId', file.publicId);
+          params.set("publicId", file.publicId);
+          if (file.resourceType) {
+            params.set("resourceType", file.resourceType);
+          }
+          if (file.format) {
+            params.set("format", file.format);
+          }
         } else {
-          params.set('url', file.url);
+          params.set("url", file.url);
         }
-        params.set('filename', file.originalName);
+        params.set("filename", file.originalName);
         const proxyUrl = `${API_URL}/api/convert/download?${params.toString()}`;
         const response = await fetch(proxyUrl);
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.message || 'Download failed');
+          throw new Error(errorData.message || "Download failed");
         }
         const blob = await response.blob();
         const blobUrl = window.URL.createObjectURL(blob);
@@ -148,8 +173,8 @@ export function ToolFileUpload({
         // Clean up blob URL
         window.URL.revokeObjectURL(blobUrl);
       } catch (err) {
-        console.error('Download error:', err);
-        setDownloadError(err instanceof Error ? err.message : 'Download failed');
+        console.error("Download error:", err);
+        setDownloadError(err instanceof Error ? err.message : "Download failed");
       }
     }
   };

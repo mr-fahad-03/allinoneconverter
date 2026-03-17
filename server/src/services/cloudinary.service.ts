@@ -1,6 +1,7 @@
 import cloudinary from "../config/cloudinary.js";
 import { v4 as uuidv4 } from "uuid";
 import streamifier from "streamifier";
+import path from "path";
 
 export interface UploadResult {
   publicId: string;
@@ -21,15 +22,18 @@ export interface UploadResult {
 export const uploadToCloudinary = (
   buffer: Buffer,
   folder: string = "allinone-pdf",
-  resourceType: "auto" | "image" | "raw" = "raw"
+  resourceType: "auto" | "image" | "raw" = "raw",
+  filename?: string
 ): Promise<UploadResult> => {
   return new Promise((resolve, reject) => {
+    const extension = filename ? path.extname(filename).replace(".", "").toLowerCase() : "";
+
     const uploadStream = cloudinary.uploader.upload_stream(
       {
         folder,
         resource_type: resourceType,
         public_id: uuidv4(),
-        format: resourceType === "raw" ? "pdf" : undefined,
+        format: resourceType === "raw" && extension ? extension : undefined,
         type: "upload",
         access_mode: "public",
       },
@@ -45,16 +49,19 @@ export const uploadToCloudinary = (
             format: result.format
           });
           
-          // Use private_download_url for raw files - this generates a proper authenticated URL
-          const downloadUrl = cloudinary.utils.private_download_url(
-            result.public_id,
-            "", // No format extension needed - already in public_id
-            {
-              resource_type: "raw",
-              type: "upload",
-              expires_at: Math.floor(Date.now() / 1000) + 3600, // 1 hour expiry
-            }
-          );
+          // Raw files require a signed private URL; images can use secure URLs.
+          const downloadUrl =
+            resourceType === "raw"
+              ? cloudinary.utils.private_download_url(
+                  result.public_id,
+                  result.format || extension || "",
+                  {
+                    resource_type: "raw",
+                    type: "upload",
+                    expires_at: Math.floor(Date.now() / 1000) + 3600, // 1 hour expiry
+                  }
+                )
+              : result.secure_url;
           
           console.log("Generated download URL:", downloadUrl);
           

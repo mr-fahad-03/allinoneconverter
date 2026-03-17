@@ -15,12 +15,16 @@ interface ConversionResult {
     originalName: string;
     url: string;
     size: number;
+    resourceType: string;
+    format?: string;
   };
   files?: Array<{
     publicId: string;
     originalName: string;
     url: string;
     size: number;
+    resourceType: string;
+    format?: string;
   }>;
 }
 
@@ -48,7 +52,8 @@ export const handleConversion = async (
       const uploadResult = await uploadToCloudinary(
         processedFile.buffer,
         isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp",
-        resourceType
+        resourceType,
+        processedFile.filename
       );
 
       result = {
@@ -58,6 +63,8 @@ export const handleConversion = async (
           originalName: processedFile.filename,
           url: uploadResult.downloadUrl,
           size: processedFile.buffer.length,
+          resourceType: uploadResult.resourceType,
+          format: uploadResult.format,
         },
       };
 
@@ -78,7 +85,8 @@ export const handleConversion = async (
         return uploadToCloudinary(
           file.buffer,
           isAuthenticated ? "allinone-pdf/outputs" : "allinone-pdf/temp",
-          resourceType
+          resourceType,
+          file.filename
         );
       });
       const uploadResults = await Promise.all(uploadPromises);
@@ -88,6 +96,8 @@ export const handleConversion = async (
         originalName: file.filename,
         url: uploadResults[index].downloadUrl,
         size: file.buffer.length,
+        resourceType: uploadResults[index].resourceType,
+        format: uploadResults[index].format,
       }));
 
       result = {

@@ -13,6 +13,8 @@ interface UploadedFile {
   originalName: string;
   url: string;
   publicId?: string;
+  resourceType?: "raw" | "image";
+  format?: string;
 }
 
 interface FileUploadProps {
@@ -128,16 +130,22 @@ export function FileUpload({
         // Use server proxy with publicId for server-side authenticated URL generation
         const params = new URLSearchParams();
         if (file.publicId) {
-          params.set('publicId', file.publicId);
+          params.set("publicId", file.publicId);
+          if (file.resourceType) {
+            params.set("resourceType", file.resourceType);
+          }
+          if (file.format) {
+            params.set("format", file.format);
+          }
         } else {
-          params.set('url', file.url);
+          params.set("url", file.url);
         }
-        params.set('filename', file.originalName);
+        params.set("filename", file.originalName);
         const proxyUrl = `${API_URL}/api/convert/download?${params.toString()}`;
         const response = await fetch(proxyUrl);
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.message || 'Download failed');
+          throw new Error(errorData.message || "Download failed");
         }
         const blob = await response.blob();
         const blobUrl = window.URL.createObjectURL(blob);
@@ -152,8 +160,8 @@ export function FileUpload({
         // Clean up blob URL
         window.URL.revokeObjectURL(blobUrl);
       } catch (err) {
-        console.error('Download error:', err);
-        setError(err instanceof Error ? err.message : 'Download failed');
+        console.error("Download error:", err);
+        setError(err instanceof Error ? err.message : "Download failed");
       }
     }
   };
